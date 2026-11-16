@@ -1,0 +1,126 @@
+{
+  "manifestVersion": 1,
+  "id": "wxichen.dsh-pet",
+  "name": {
+    "default": "DSH Pet",
+    "zh-CN": "AiCode 桌宠"
+  },
+  "version": "0.1.0",
+  "publisher": "wxichen",
+  "repository": "https://github.com/wxichen/aicode-plugins",
+  "description": {
+    "default": "A floating desktop pet adapted from dsh-pet for AiCode. It plays transparent animations, reacts to AiCode runs, accepts chat prompts and can be controlled by AI tools.",
+    "zh-CN": "将 dsh-pet 适配到 AiCode 的悬浮桌宠：播放透明动画、响应 AiCode 运行状态、写入聊天提示词，并支持 AI 工具控制。"
+  },
+  "license": "MIT",
+  "icon": "assets/logo.png",
+  "engines": {
+    "pluginApi": "^1.0.0"
+  },
+  "runtime": {
+    "type": "javascript",
+    "entry": "dist/main.js",
+    "resident": true
+  },
+  "contributes": {
+    "configPage": "pages/config.html",
+    "overlay": {
+      "purpose": "显示 AiCode 桌宠、运行状态和交互气泡",
+      "surfaces": [
+        {
+          "id": "pet",
+          "page": "pages/pet.html",
+          "width": 200,
+          "height": 170,
+          "draggable": true,
+          "snap": "both"
+        }
+      ]
+    },
+    "uiEntries": [
+      {
+        "id": "settings",
+        "title": {
+          "default": "DSH Pet Settings",
+          "zh-CN": "桌宠设置"
+        },
+        "slot": "settings.ai",
+        "page": "pages/config.html",
+        "icon": "zap"
+      }
+    ],
+    "hooks": [
+      {
+        "id": "boot",
+        "event": "app.started",
+        "handler": "hooks.boot"
+      },
+      {
+        "id": "enabled",
+        "event": "plugin.enabled",
+        "handler": "hooks.enabled"
+      },
+      {
+        "id": "run-started",
+        "event": "agent.run.started",
+        "handler": "hooks.runStarted"
+      },
+      {
+        "id": "tool-started",
+        "event": "agent.tool.started",
+        "handler": "hooks.toolStarted"
+      },
+      {
+        "id": "tool-finished",
+        "event": "agent.tool.finished",
+        "handler": "hooks.toolFinished"
+      },
+      {
+        "id": "run-finished",
+        "event": "agent.run.finished",
+        "handler": "hooks.runFinished"
+      }
+    ],
+    "tools": [
+      {
+        "id": "say",
+        "title": {
+          "default": "Pet Says",
+          "zh-CN": "让桌宠说话"
+        },
+        "description": {
+          "default": "Show a short message in the AiCode floating pet bubble.",
+          "zh-CN": "让 AiCode 桌宠显示一条简短气泡消息。"
+        },
+        "inputSchema": "schemas/say.input.json",
+        "handler": "tools.say"
+      },
+      {
+        "id": "play",
+        "title": {
+          "default": "Play Pet Animation",
+          "zh-CN": "播放桌宠动作"
+        },
+        "description": {
+          "default": "Play one of the bundled pet animations.",
+          "zh-CN": "播放插件内置的一段桌宠透明动画。"
+        },
+        "inputSchema": "schemas/play.input.json",
+        "handler": "tools.play"
+      },
+      {
+        "id": "sleep",
+        "title": {
+          "default": "Toggle Pet Sleep",
+          "zh-CN": "切换桌宠睡眠"
+        },
+        "description": {
+          "default": "Put the pet to sleep, wake it up, or toggle its sleep state.",
+          "zh-CN": "让桌宠睡觉、叫醒，或切换当前睡眠状态。"
+        },
+        "inputSchema": "schemas/sleep.input.json",
+        "handler": "tools.sleep"
+      }
+    ]
+  }
+}

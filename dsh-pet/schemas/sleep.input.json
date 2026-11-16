@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "description": "sleep 睡觉、wake 叫醒、toggle 切换",
+      "enum": ["sleep", "wake", "toggle"]
+    }
+  },
+  "required": ["action"]
+}

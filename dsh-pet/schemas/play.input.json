@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "animation": {
+      "type": "string",
+      "description": "要播放的动作名称",
+      "enum": [
+        "idle",
+        "turn",
+        "click",
+        "drag",
+        "action",
+        "sleepStart",
+        "sleepLoop",
+        "sleepEnd",
+        "thinking",
+        "working",
+        "success",
+        "error",
+        "say"
+      ]
+    }
+  },
+  "required": ["animation"]
+}

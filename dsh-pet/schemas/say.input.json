@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "properties": {
+    "text": {
+      "type": "string",
+      "description": "要显示在桌宠气泡中的短消息",
+      "maxLength": 240
+    },
+    "animation": {
+      "type": "string",
+      "description": "可选动作：say、click、action",
+      "enum": ["say", "click", "action"]
+    }
+  },
+  "required": ["text"]
+}

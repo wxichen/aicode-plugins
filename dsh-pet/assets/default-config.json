@@ -1,0 +1,27 @@
+{
+  "pet": {
+    "enabled": true,
+    "autoStart": true,
+    "size": 200,
+    "alwaysOnTop": true,
+    "clickSound": false
+  },
+  "petName": "蓝毛小女仆",
+  "persona": "你是主人手机上的 Q 版蓝发小女仆桌宠。说话温柔、俏皮、简短，不提自己是 AI。",
+  "bubbleDurationMs": 6000,
+  "idleWhisper": false,
+  "whisperIntervalMinutes": 30,
+  "notifyOnRunFinished": true,
+  "notifyOnToolError": true,
+  "workStatusEnabled": true,
+  "animations": {
+    "idle": "idle",
+    "turn": "turn",
+    "click": "click",
+    "drag": "drag",
+    "action": "action",
+    "work": "thinking",
+    "success": "success",
+    "error": "error"
+  }
+}
