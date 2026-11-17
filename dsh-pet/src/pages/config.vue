@@ -135,26 +135,17 @@
     </aicode-dialog>
 
     <aicode-dialog v-model="ttsOpen" title="语音合成（TTS）" confirm-text="保存" @confirm="saveTts">
-      <aicode-field label="供应商来源">
-        <aicode-select v-model="ttsDraft.source" :options="ttsSourceOptions" @update:model-value="onTtsSourceKindChange" />
+      <aicode-field label="供应商">
+        <aicode-select v-model="ttsDraft.providerId" :options="ttsProviderPickerOptions" @update:model-value="onTtsProviderPick" />
       </aicode-field>
-      <template v-if="ttsDraft.source === 'follow'">
-        <aicode-info-row label="跟随" :value="ttsProviderLabel" />
-        <p class="voice-hint">
-          沿用「生成台词」的供应商。Gemini 走原生语音接口，其余按 OpenAI 兼容接口处理。
-        </p>
-        <aicode-field label="语音模型（该供应商已配置的）">
-          <aicode-select v-model="ttsModelPick" :options="ttsModelOptions" @update:model-value="onTtsModelPick" />
-        </aicode-field>
-        <p v-if="ttsModelHint" class="voice-hint">{{ ttsModelHint }}</p>
-      </template>
-      <aicode-field :label="ttsDraft.source === 'custom' ? '语音模型' : '模型名（可手动改）'">
-        <aicode-input v-model="ttsDraft.model" :placeholder="ttsModelPlaceholder" />
+      <aicode-field label="模型">
+        <aicode-select v-model="ttsModelPick" :options="ttsModelOptions" @update:model-value="onTtsModelPick" />
       </aicode-field>
+      <p class="voice-hint">{{ ttsModelHint }}</p>
       <aicode-field label="音色">
         <aicode-input v-model="ttsDraft.voice" :placeholder="ttsVoicePlaceholder" />
       </aicode-field>
-      <aicode-field label="API 地址">
+      <aicode-field label="API 地址（可留空）">
         <aicode-input v-model="ttsDraft.baseUrl" :placeholder="ttsBaseUrlPlaceholder" />
       </aicode-field>
       <aicode-field label="API Key">
@@ -267,47 +258,42 @@ const ttsHasKey = ref(false);
 const ttsKeyInput = ref('');
 const ttsDraft = ref({
   provider: 'none' as TtsProvider,
-  source: 'follow' as 'follow' | 'custom',
+  providerId: '',
   baseUrl: '',
   model: '',
   voice: '',
   speed: 1
 });
-const ttsSourceOptions = [
-  { value: 'follow', label: '跟随生成台词的供应商' },
-  { value: 'custom', label: '自定义（任意兼容服务）' }
-];
+const ttsProviderPickerOptions = computed(() => [
+  { value: '', label: '未选择' },
+  ...ttsPresets.value.map((preset) => ({
+    value: preset.providerId,
+    label: preset.providerName + (preset.hasKey ? '' : '（未配置密钥）')
+  }))
+]);
 const ttsAddressHint = computed(() =>
-  ttsDraft.value.source === 'custom'
-    ? '自定义服务需填完整地址（例如 http://127.0.0.1:8788/v1）与密钥；留空则用该协议的官方地址。'
-    : '宿主不会把 AiCode 里的供应商地址与密钥交给插件，所以这两项需在这里各填一次；密钥由宿主加密存储。'
+  ttsDraft.value.providerId
+    ? '宿主不会把该供应商的地址与密钥交给插件，所以这两项需在这里各填一次；密钥由宿主加密存储。'
+    : '可先在「生成台词 - 供应商」里添加一个供应商，这里就能直接选它的模型。'
 );
 const ttsModelPick = ref('');
 const ttsPresets = ref<Array<{ providerId: string; providerName: string; tts: { provider: TtsProvider; baseUrl: string; model: string }; hasKey: boolean }>>([]);
-/** 朗读跟随「生成台词」的供应商；未指定时自动用默认供应商。 */
-const ttsProviderId = computed(() => {
-  if (settings.value.voice.providerId) return settings.value.voice.providerId;
-  return ttsPresets.value.find((item) => item.hasKey)?.providerId ?? '';
-});
-const ttsProviderLabel = computed(() => {
-  const id = ttsProviderId.value;
-  if (!id) return '未找到可用供应商';
-  const preset = ttsPresets.value.find((item) => item.providerId === id);
-  const name = preset ? preset.providerName : id;
-  return settings.value.voice.providerId ? name : name + '（默认供应商）';
-});
-/** 该供应商实际已配置的模型，用于避免填一个它并不支持的语音模型。 */
-const ttsProviderModels = computed(() => voiceOptions.value.find((p) => p.id === ttsProviderId.value)?.models ?? []);
+/** 该供应商在 AiCode 里已配置的模型；宿主返回的是它实际配置的名单，包含非对话模型。 */
+const ttsProviderModels = computed(
+  () => voiceOptions.value.find((p) => p.id === ttsDraft.value.providerId)?.models ?? []
+);
 const ttsModelOptions = computed(() => [
-  { value: '', label: '手动输入' },
-  ...ttsProviderModels.value.map((model) => ({ value: model.id, label: model.displayName || model.id }))
+  ...ttsProviderModels.value.map((model) => ({ value: model.id, label: model.displayName || model.id })),
+  { value: '', label: '以上都不是，手动填写' }
 ]);
 const ttsModelHint = computed(() => {
+  if (!ttsDraft.value.providerId) return '先选一个供应商，就能列出它已配置的模型。';
   if (ttsProviderModels.value.length === 0) {
-    return '这个供应商没有可枚举的模型，请在下方直接填语音模型名。';
+    return '这个供应商没有可枚举的模型，请把语音模型名填到下面的输入框。';
   }
-  return '这些是该供应商已配置的模型；其中不一定包含语音模型，请确认后填写。';
+  return '这些是你在 AiCode 里为该供应商配置的模型；若语音模型不在列表里，选「手动填写」后输入名称。';
 });
+
 const ttsModelPlaceholder = computed(() =>
   ttsDraft.value.provider === 'gemini' ? 'gemini-2.5-flash-preview-tts' : 'gpt-4o-mini-tts'
 );
@@ -472,6 +458,7 @@ function onTtsModelPick(): void {
   if (ttsModelPick.value) ttsDraft.value.model = ttsModelPick.value;
 }
 
+
 async function toggleSpeakAloud(enabled: boolean): Promise<void> {
   settings.value = { ...settings.value, voice: { ...settings.value.voice, speakAloud: enabled } };
   await save();
@@ -485,7 +472,7 @@ function openTtsSheet(): void {
   const tts = settings.value.voice.tts;
   ttsDraft.value = {
     provider: tts.provider,
-    source: tts.source,
+    providerId: tts.providerId,
     baseUrl: tts.baseUrl,
     model: tts.model,
     voice: tts.voice,
@@ -493,34 +480,35 @@ function openTtsSheet(): void {
   };
   ttsKeyInput.value = '';
   ttsHint.value = '';
-  ttsModelPick.value = '';
-  // 首次打开时按当前供应商类型推断协议，避免默认落到不匹配的接口。
-  if (tts.provider === 'none') {
-    const preset = ttsPresets.value.find((item) => item.providerId === ttsProviderId.value)
-      ?? ttsPresets.value.find((item) => item.hasKey);
-    if (preset) {
-      ttsDraft.value.provider = preset.tts.provider;
-      ttsDraft.value.model = preset.tts.model;
-    }
+  ttsModelPick.value = tts.model;
+  // 未配置过时，默认落到「生成台词」用的供应商，省得再选一次。
+  if (!tts.providerId) {
+    ttsDraft.value.providerId =
+      settings.value.voice.providerId ||
+      ttsPresets.value.find((item) => item.hasKey)?.providerId ||
+      '';
+  }
+  if (tts.provider === 'none' && ttsDraft.value.providerId) {
+    const preset = ttsPresets.value.find((item) => item.providerId === ttsDraft.value.providerId);
+    if (preset) ttsDraft.value.provider = preset.tts.provider;
   }
   void loadTtsState();
   ttsOpen.value = true;
 }
 
-/** 切换跟随/自定义；自定义时按地址形状猜协议，避免还要多选一次。 */
-function onTtsSourceKindChange(): void {
-  if (ttsDraft.value.source === 'custom') {
-    const looksGemini = /generativelanguage\.googleapis\.com/i.test(ttsDraft.value.baseUrl);
-    ttsDraft.value.provider = looksGemini ? 'gemini' : 'openai';
-    return;
-  }
-  const preset = ttsPresets.value.find((item) => item.providerId === ttsProviderId.value)
-    ?? ttsPresets.value.find((item) => item.hasKey);
-  if (preset) {
-    ttsDraft.value.provider = preset.tts.provider;
-    ttsDraft.value.model = preset.tts.model;
-    ttsDraft.value.baseUrl = '';
-  }
+/** 换供应商：同步协议，并把模型候选换成该供应商的。 */
+function onTtsProviderPick(): void {
+  const preset = ttsPresets.value.find((item) => item.providerId === ttsDraft.value.providerId);
+  if (!preset) return;
+  ttsDraft.value.provider = preset.tts.provider;
+  ttsDraft.value.baseUrl = '';
+  // 保留当前模型名，若该供应商有同名模型则直接对上。
+  const keep = ttsDraft.value.model;
+  const exists = (voiceOptions.value.find((p) => p.id === ttsDraft.value.providerId)?.models ?? []).some(
+    (model) => model.id === keep
+  );
+  if (!exists) ttsDraft.value.model = '';
+  ttsModelPick.value = exists ? keep : '';
 }
 
 /** 关闭朗读：把供应商置为 none，保留其他字段以便下次打开。 */
@@ -553,7 +541,7 @@ async function saveTts(): Promise<void> {
         speakAloud: settings.value.voice.speakAloud,
         tts: {
           provider: draft.provider,
-          source: draft.source,
+          providerId: draft.providerId,
           baseUrl: draft.baseUrl.trim(),
           model: draft.model.trim(),
           voice: draft.voice.trim(),
@@ -584,6 +572,8 @@ async function previewTts(): Promise<void> {
       ttsHint.value = probe.reason || '该地址没有语音合成接口';
       return;
     }
+    // 合成用的是已保存配置，先把草稿落盘再试听。
+    await saveTts();
     const result = await aicode.invoke<{ ok?: boolean; reason?: string }>('ui.tts.preview');
     ttsHint.value = result?.ok ? '已发送到桌宠播放' : result?.reason || '试听失败';
   } catch (error) {
