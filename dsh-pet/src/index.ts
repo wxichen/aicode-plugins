@@ -1,4 +1,4 @@
-import { definePlugin, hostCall, emit, type PluginArgs, type PluginHandler } from '@jieapi/plugin-sdk';
+import { definePlugin, hostCall, emit, log, type PluginArgs, type PluginHandler } from '@jieapi/plugin-sdk';
 import {
   DEFAULT_SETTINGS,
   MOOD_DEFAULT,
@@ -10,6 +10,7 @@ import {
 } from './shared/settings';
 import { INTERACTIONS } from './shared/voice';
 import { listVoiceOptions, speak, voiceRequested } from './voiceGen';
+import { saveTtsKey, synthesize, ttsKeyPresent } from './speech';
 
 const CONFIG_PATH = 'data://config.json';
 const STATE_PATH = 'data://state.json';
@@ -184,6 +185,23 @@ async function publishState(animation?: PetAnimation, text?: string): Promise<vo
   if (allowedText !== undefined) state.lastText = allowedText;
   if (changed) persistState();
   await postOverlay({ type: 'pet.state', state: statePayload() });
+  if (allowedText) void speakAloud(allowedText);
+}
+
+/**
+ * 台词落到气泡后朗读。失败只记日志，不影响气泡与动画。
+ * 新台词视为打断上一句，避免旧音频盖过新内容。
+ */
+async function speakAloud(text: string): Promise<void> {
+  if (!settings.voice.speakAloud || settings.voice.tts.provider === 'none') return;
+  if (!overlayId) return;
+  try {
+    const audio = await synthesize(settings, text);
+    if (!audio) return;
+    await postOverlay({ type: 'pet.speech', audio });
+  } catch (error) {
+    log(`桌宠朗读失败：${errorMessage(error)}`);
+  }
 }
 
 async function closeOverlay(): Promise<void> {
@@ -510,6 +528,33 @@ const handlers: Record<string, PluginHandler> = {
   },
 
   'ui.voice.options': async () => listVoiceOptions(),
+
+  'ui.tts.state': async () => {
+    await load();
+    return { tts: settings.voice.tts, hasKey: await ttsKeyPresent() };
+  },
+
+  'ui.tts.saveKey': async (args: PluginArgs) => {
+    await load();
+    await saveTtsKey(readString(args, 'apiKey'));
+    const hasKey = await ttsKeyPresent();
+    settings = { ...settings, voice: { ...settings.voice, tts: { ...settings.voice.tts, hasKey } } };
+    await persistSettings();
+    return { hasKey };
+  },
+
+  'ui.tts.preview': async (args: PluginArgs) => {
+    await load();
+    const text = readString(args, 'text') || '你好呀，我是' + settings.petName + '。';
+    const audio = await synthesize(settings, text);
+    if (!audio) return { ok: false, reason: 'TTS 未配置或缺少密钥' };
+    if (!overlayId) {
+      const opened = await openPet();
+      if (!opened.ok) return { ok: false, reason: opened.message || opened.code || '浮层不可用' };
+    }
+    await postOverlay({ type: 'pet.speech', audio });
+    return { ok: true, durationHintMs: audio.durationHintMs };
+  },
 
   'ui.pet.open': async () => openPet(),
 

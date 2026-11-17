@@ -12,6 +12,7 @@ let buffer = '';
 const pending = new Map();
 const hostHandlers = new Map();
 const calls = [];
+const ttsCalls = [];
 const files = new Map();
 
 files.set(
@@ -78,6 +79,10 @@ hostHandlers.set('host.model.read', async () => ({
   final: { content: '模型生成的一句台词。' }
 }));
 hostHandlers.set('host.model.close', async () => ({ ok: true }));
+const secrets = new Map();
+hostHandlers.set('host.secrets.get', async (params) => ({ value: secrets.get(String(params.key)) ?? null }));
+hostHandlers.set('host.secrets.set', async (params) => { secrets.set(String(params.key), String(params.value)); return { ok: true }; });
+hostHandlers.set('host.secrets.delete', async (params) => { secrets.delete(String(params.key)); return { ok: true }; });
 
 child.stdout.setEncoding('utf8');
 child.stdout.on('data', (chunk) => {
@@ -268,6 +273,53 @@ async function run() {
   if (!overlayHide || overlayHide.ok !== true) failures.push('浮层 pet.hide 未生效');
   const enabledAfterHide = (await invokeHandler('ui.pet.state')).settings.pet.enabled;
   if (enabledAfterHide !== false) failures.push('浮层 pet.hide 未关闭启用开关');
+
+  // TTS：用本地 HTTP 服务当假供应商，验证进程真的拿到音频字节并推给浮层。
+  const ttsServer = require('http').createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const parsed = JSON.parse(body || '{}');
+      ttsCalls.push({ url: req.url, auth: req.headers.authorization, body: parsed });
+      res.writeHead(200, { 'Content-Type': 'audio/mpeg' });
+      res.end(Buffer.from([0xff, 0xfb, 0x90, 0x64, 0x00, 0x01, 0x02]));
+    });
+  });
+  await new Promise((resolve) => ttsServer.listen(0, '127.0.0.1', resolve));
+  const ttsPort = ttsServer.address().port;
+
+  await invokeHandler('ui.settings.save', {
+    settings: {
+      ...(await invokeHandler('ui.pet.state')).settings,
+      voice: {
+        mode: 'auto',
+        providerId: '',
+        model: '',
+        speakAloud: true,
+        tts: { provider: 'openai', baseUrl: 'http://127.0.0.1:' + ttsPort + '/v1', model: 'tts-test', voice: 'alloy', hasKey: true, speed: 1 }
+      }
+    }
+  });
+
+  const keySaved = await invokeHandler('ui.tts.saveKey', { apiKey: 'sk-test-key' });
+  if (!keySaved || keySaved.hasKey !== true) failures.push('TTS 密钥未保存');
+
+  const ttsState = await invokeHandler('ui.tts.state');
+  if (!ttsState || ttsState.hasKey !== true) failures.push('TTS 状态未读到密钥');
+
+  const preview = await invokeHandler('ui.tts.preview', { text: '朗读测试' });
+  if (!preview || preview.ok !== true) failures.push('TTS 试听未成功: ' + JSON.stringify(preview));
+  const speechPushed = await waitFor(() =>
+    calls.some((item) => item.overlay && item.overlay.type === 'pet.speech')
+  );
+  if (!speechPushed) failures.push('TTS 音频未推送到浮层');
+  const speechPayload = calls.filter((item) => item.overlay && item.overlay.type === 'pet.speech').pop();
+  if (!speechPayload || !String(speechPayload.overlay.audio.url).startsWith('data:audio/mpeg;base64,')) {
+    failures.push('TTS 音频不是可播放的 data URL');
+  }
+  if (ttsCalls.length === 0) failures.push('TTS 未真正发出 HTTP 请求');
+  else if (ttsCalls[0].auth !== 'Bearer sk-test-key') failures.push('TTS 请求未带正确 Authorization');
+  ttsServer.close();
 
   const hidden = await invokeHandler('ui.pet.hide');
   if (!hidden || !hidden.settings || hidden.settings.pet.enabled !== false) failures.push('隐藏桌宠失败');

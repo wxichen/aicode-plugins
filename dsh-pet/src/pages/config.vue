@@ -47,6 +47,23 @@
           <span class="setting-action">选择</span>
         </button>
       </template>
+      <aicode-divider />
+      <setting-switch
+        :model-value="settings.voice.speakAloud"
+        title="朗读台词"
+        subtitle="气泡出现时用云端语音念出来，需先配置 TTS"
+        @update:model-value="toggleSpeakAloud"
+      />
+      <template v-if="settings.voice.speakAloud">
+        <aicode-divider />
+        <button class="setting-line" type="button" @click="openTtsSheet">
+          <span class="setting-text">
+            <span class="setting-title">语音合成（TTS）</span>
+            <span class="setting-subtitle">{{ ttsSubtitle }}</span>
+          </span>
+          <span class="setting-action">配置</span>
+        </button>
+      </template>
       <div class="actions">
         <aicode-button variant="primary" :disabled="saving" @click="save">
           {{ saving ? '保存中…' : '保存设置' }}
@@ -116,6 +133,31 @@
       </aicode-field>
       <p v-if="voiceHint" class="voice-hint">{{ voiceHint }}</p>
     </aicode-dialog>
+
+    <aicode-dialog v-model="ttsOpen" title="语音合成（TTS）" confirm-text="保存" @confirm="saveTts">
+      <aicode-field label="供应商">
+        <aicode-select v-model="ttsDraft.provider" :options="ttsProviderOptions" @update:model-value="onTtsProviderChange" />
+      </aicode-field>
+      <aicode-field label="模型">
+        <aicode-input v-model="ttsDraft.model" :placeholder="ttsModelPlaceholder" />
+      </aicode-field>
+      <aicode-field label="音色">
+        <aicode-input v-model="ttsDraft.voice" :placeholder="ttsVoicePlaceholder" />
+      </aicode-field>
+      <aicode-field label="API 地址（可留空）">
+        <aicode-input v-model="ttsDraft.baseUrl" :placeholder="ttsBaseUrlPlaceholder" />
+      </aicode-field>
+      <aicode-field label="API Key">
+        <aicode-input v-model="ttsKeyInput" type="password" :placeholder="ttsHasKey ? '已保存，留空则不修改' : '填入后保存'" />
+      </aicode-field>
+      <p class="voice-hint">
+        密钥由宿主加密存储，不写入插件配置。合成在插件进程内直接请求供应商，音频只在本地传给浮层播放。
+      </p>
+      <div class="tts-actions">
+        <aicode-button :disabled="busy" @click="previewTts">试听</aicode-button>
+      </div>
+      <p v-if="ttsHint" class="voice-hint">{{ ttsHint }}</p>
+    </aicode-dialog>
   </div>
 </template>
 
@@ -127,7 +169,8 @@ import {
   MOOD_DEFAULT,
   normalizeSettings,
   type PetSettings,
-  type PetState
+  type PetState,
+  type TtsProvider
 } from '../shared/settings';
 
 /**
@@ -209,6 +252,41 @@ const confirmOpen = ref(false);
 const modelPickerOpen = ref(false);
 const voiceOptions = ref<Array<{ id: string; name: string; models: VoiceModel[] }>>([]);
 const voiceHint = ref('');
+const ttsOpen = ref(false);
+const ttsHint = ref('');
+const ttsHasKey = ref(false);
+const ttsKeyInput = ref('');
+const ttsDraft = ref({
+  provider: 'none' as TtsProvider,
+  baseUrl: '',
+  model: '',
+  voice: '',
+  speed: 1
+});
+const ttsProviderOptions = [
+  { value: 'none', label: '不启用' },
+  { value: 'openai', label: 'OpenAI 兼容（OpenAI / xAI / DeepSeek 等）' },
+  { value: 'gemini', label: 'Google Gemini' }
+];
+const ttsModelPlaceholder = computed(() =>
+  ttsDraft.value.provider === 'gemini' ? 'gemini-2.5-flash-preview-tts' : 'gpt-4o-mini-tts'
+);
+const ttsVoicePlaceholder = computed(() =>
+  ttsDraft.value.provider === 'gemini' ? 'Kore' : 'alloy / nova / shimmer …'
+);
+const ttsBaseUrlPlaceholder = computed(() =>
+  ttsDraft.value.provider === 'gemini'
+    ? 'https://generativelanguage.googleapis.com/v1beta'
+    : 'https://api.openai.com/v1'
+);
+const ttsSubtitle = computed(() => {
+  const tts = settings.value.voice.tts;
+  if (tts.provider === 'none') return '未启用';
+  const name = tts.provider === 'gemini' ? 'Gemini' : 'OpenAI 兼容';
+  const voice = tts.voice ? ` · ${tts.voice}` : '';
+  const key = ttsHasKey || tts.hasKey ? '' : ' · 缺少密钥';
+  return name + voice + key;
+});
 const voiceDraft = ref({ providerId: '', model: '' });
 const status = ref('');
 let offEvents: (() => void) | null = null;
@@ -320,6 +398,92 @@ async function applyModelChoice(): Promise<void> {
     voice: { mode: 'auto', providerId: voiceDraft.value.providerId, model: voiceDraft.value.model }
   };
   await save();
+}
+
+async function loadTtsState(): Promise<void> {
+  try {
+    const result = await aicode.invoke<{ tts?: PetSettings['voice']['tts']; hasKey?: boolean }>('ui.tts.state');
+    if (result?.tts) settings.value = { ...settings.value, voice: { ...settings.value.voice, tts: result.tts } };
+    ttsHasKey.value = result?.hasKey === true;
+  } catch (error) {
+    ttsHint.value = '读取 TTS 状态失败：' + (error as Error).message;
+  }
+}
+
+async function toggleSpeakAloud(enabled: boolean): Promise<void> {
+  settings.value = { ...settings.value, voice: { ...settings.value.voice, speakAloud: enabled } };
+  await save();
+  if (enabled) {
+    await loadTtsState();
+    if (settings.value.voice.tts.provider === 'none') openTtsSheet();
+  }
+}
+
+function openTtsSheet(): void {
+  const tts = settings.value.voice.tts;
+  ttsDraft.value = {
+    provider: tts.provider,
+    baseUrl: tts.baseUrl,
+    model: tts.model,
+    voice: tts.voice,
+    speed: tts.speed
+  };
+  ttsKeyInput.value = '';
+  ttsHint.value = '';
+  void loadTtsState();
+  ttsOpen.value = true;
+}
+
+function onTtsProviderChange(): void {
+  ttsDraft.value.model = '';
+  ttsDraft.value.voice = '';
+  ttsDraft.value.baseUrl = '';
+}
+
+async function saveTts(): Promise<void> {
+  busy.value = true;
+  try {
+    if (ttsKeyInput.value.trim()) {
+      const saved = await aicode.invoke<{ hasKey?: boolean }>('ui.tts.saveKey', { apiKey: ttsKeyInput.value.trim() });
+      ttsHasKey.value = saved?.hasKey === true;
+      ttsKeyInput.value = '';
+    }
+    const draft = ttsDraft.value;
+    settings.value = {
+      ...settings.value,
+      voice: {
+        ...settings.value.voice,
+        speakAloud: settings.value.voice.speakAloud,
+        tts: {
+          provider: draft.provider,
+          baseUrl: draft.baseUrl.trim(),
+          model: draft.model.trim(),
+          voice: draft.voice.trim(),
+          hasKey: ttsHasKey.value,
+          speed: draft.speed
+        }
+      }
+    };
+    await save();
+    ttsHint.value = draft.provider === 'none' ? '已关闭 TTS' : '已保存，可试听确认';
+  } catch (error) {
+    ttsHint.value = '保存失败：' + (error as Error).message;
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function previewTts(): Promise<void> {
+  busy.value = true;
+  ttsHint.value = '正在合成…';
+  try {
+    const result = await aicode.invoke<{ ok?: boolean; reason?: string }>('ui.tts.preview');
+    ttsHint.value = result?.ok ? '已发送到桌宠播放' : result?.reason || '试听失败';
+  } catch (error) {
+    ttsHint.value = '试听失败：' + (error as Error).message;
+  } finally {
+    busy.value = false;
+  }
 }
 
 async function ensureOpen(): Promise<boolean> {
@@ -435,6 +599,7 @@ onMounted(async () => {
     }
   });
   await load();
+  await loadTtsState();
 });
 
 onBeforeUnmount(() => {
@@ -520,6 +685,12 @@ onBeforeUnmount(() => {
 input[type='range'] {
   width: 100%;
   accent-color: var(--aicode-primary);
+}
+
+.tts-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .voice-hint {

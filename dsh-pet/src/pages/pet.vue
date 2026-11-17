@@ -61,7 +61,8 @@ import {
   normalizeSettings,
   type PetAnimation,
   type PetSettings,
-  type PetState
+  type PetState,
+  type SpeechAudio
 } from '../shared/settings';
 
 const CREATE_WIDTH = 200;
@@ -262,6 +263,24 @@ function parseMessage(raw: OverlayMessage): Record<string, unknown> {
 }
 
 let audioCtx: AudioContext | null = null;
+let speechEl: HTMLAudioElement | null = null;
+
+/**
+ * 播放 TTS 合成好的语音。data URL 在 CSP 的 media-src 白名单内，可直接赋值给 src。
+ * 新语音打断上一句，避免多句叠加。
+ */
+function playSpeech(audio: SpeechAudio | null): void {
+  if (!audio?.url) return;
+  if (!speechEl) {
+    speechEl = new Audio();
+    speechEl.preload = 'auto';
+  }
+  speechEl.pause();
+  speechEl.src = audio.url;
+  void speechEl.play().catch(() => {
+    // 没有音频焦点或被系统拒绝时静默跳过，气泡文字仍然可见。
+  });
+}
 
 /** 点击音效用 WebAudio 现场合成，包内没有音频素材，也避免额外解码开销。 */
 function playClickSound(): void {
@@ -377,6 +396,8 @@ function onMessage(raw: OverlayMessage): void {
     void applySettings(message.settings as PetSettings);
   } else if (message.type === 'pet.state' && message.state) {
     applyState(message.state as PetState);
+  } else if (message.type === 'pet.speech') {
+    playSpeech(message.audio as SpeechAudio | null);
   } else if (message.type === 'click') {
     void closeMenu();
     if (state.value.sleeping) {

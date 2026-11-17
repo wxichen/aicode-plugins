@@ -16,11 +16,29 @@ export type PetAnimation =
 /** 台词来源：auto 用已配置模型按人设生成，canned 只用内置语料。 */
 export type VoiceMode = 'auto' | 'canned';
 
+/** TTS 供应商：openai 兼容接口（含 xAI/DeepSeek 等），或 Google Gemini。 */
+export type TtsProvider = 'none' | 'openai' | 'gemini';
+
+export interface TtsSettings {
+  provider: TtsProvider;
+  /** API 地址；留空使用供应商默认域名。 */
+  baseUrl: string;
+  model: string;
+  voice: string;
+  /** 密钥存放在宿主加密存储里，这里只记键名与是否存在。 */
+  hasKey: boolean;
+  /** 0.5–2.0，1.0 为正常语速。 */
+  speed: number;
+}
+
 export interface VoiceSettings {
   mode: VoiceMode;
   /** 空字符串表示自动挑选可用供应商与模型。 */
   providerId: string;
   model: string;
+  /** 台词生成后自动朗读。 */
+  speakAloud: boolean;
+  tts: TtsSettings;
 }
 
 export interface PetSettings {
@@ -64,6 +82,14 @@ export interface PetState {
   updatedAt: number;
 }
 
+/** 进程合成完成后推给浮层播放的语音。 */
+export interface SpeechAudio {
+  /** data URL，CSP 的 media-src 已允许 data:。 */
+  url: string;
+  mimeType: string;
+  durationHintMs: number;
+}
+
 export interface PetSettingsMessage {
   type: 'pet.settings';
   settings: PetSettings;
@@ -89,7 +115,16 @@ export const DEFAULT_SETTINGS: PetSettings = {
   voice: {
     mode: 'auto',
     providerId: '',
-    model: ''
+    model: '',
+    speakAloud: false,
+    tts: {
+      provider: 'none',
+      baseUrl: '',
+      model: '',
+      voice: '',
+      hasKey: false,
+      speed: 1
+    }
   },
   bubbleDurationMs: 6000,
   idleWhisper: false,
@@ -153,6 +188,22 @@ export function clampMood(value: number): number {
   return Math.min(MOOD_MAX, Math.max(MOOD_MIN, Math.round(value)));
 }
 
+function readTtsProvider(value: unknown, fallback: TtsProvider): TtsProvider {
+  return value === 'openai' || value === 'gemini' || value === 'none' ? value : fallback;
+}
+
+function normalizeTts(raw: unknown): TtsSettings {
+  const input = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  return {
+    provider: readTtsProvider(input.provider, DEFAULT_SETTINGS.voice.tts.provider),
+    baseUrl: typeof input.baseUrl === 'string' ? input.baseUrl.trim() : '',
+    model: typeof input.model === 'string' ? input.model.trim() : '',
+    voice: typeof input.voice === 'string' ? input.voice.trim() : '',
+    hasKey: readBoolean(input.hasKey, false),
+    speed: Math.min(2, Math.max(0.5, readNumber(input.speed, DEFAULT_SETTINGS.voice.tts.speed)))
+  };
+}
+
 export function normalizeSettings(raw: unknown): PetSettings {
   const input = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   const petRaw = input.pet && typeof input.pet === 'object' ? (input.pet as Record<string, unknown>) : {};
@@ -174,7 +225,9 @@ export function normalizeSettings(raw: unknown): PetSettings {
     voice: {
       mode: voiceRaw.mode === 'canned' ? 'canned' : 'auto',
       providerId: typeof voiceRaw.providerId === 'string' ? voiceRaw.providerId : '',
-      model: typeof voiceRaw.model === 'string' ? voiceRaw.model : ''
+      model: typeof voiceRaw.model === 'string' ? voiceRaw.model : '',
+      speakAloud: readBoolean(voiceRaw.speakAloud, DEFAULT_SETTINGS.voice.speakAloud),
+      tts: normalizeTts(voiceRaw.tts)
     },
     bubbleDurationMs: Math.min(30000, Math.max(1500, readNumber(input.bubbleDurationMs, DEFAULT_SETTINGS.bubbleDurationMs))),
     idleWhisper: readBoolean(input.idleWhisper, DEFAULT_SETTINGS.idleWhisper),
