@@ -337,6 +337,16 @@ async function interact(kind: string): Promise<{ ok: boolean; mood: number; text
   return { ok: true, mood: state.mood, text: line.text, source: line.source };
 }
 
+async function setSleeping(nextSleeping: boolean): Promise<{ ok: boolean; sleeping: boolean }> {
+  if (nextSleeping === state.sleeping) return { ok: true, sleeping: state.sleeping };
+  state.sleeping = nextSleeping;
+  if (overlayId) {
+    const line = await speak(settings, nextSleeping ? 'sleep' : 'wake', state.mood);
+    await publishState(nextSleeping ? 'sleepStart' : 'sleepEnd', line.text);
+  }
+  return { ok: true, sleeping: state.sleeping };
+}
+
 const handlers: Record<string, PluginHandler> = {
   'hooks.boot': async () => {
     await startAutomatically();
@@ -449,6 +459,17 @@ const handlers: Record<string, PluginHandler> = {
         return { ok: false, message: errorMessage(error) };
       }
     }
+    if (type === 'pet.toggleSleep') {
+      return setSleeping(!state.sleeping);
+    }
+    if (type === 'pet.hide') {
+      settings = { ...settings, pet: { ...settings.pet, enabled: false } };
+      await persistSettings();
+      stopIdleWhisper();
+      stopIdleTurn();
+      await closeOverlay();
+      return { ok: true };
+    }
     if (type === 'pet.refresh') {
       await publishSettings();
       await publishState(state.lastAnimation ?? settings.animations.idle, state.lastText);
@@ -545,20 +566,7 @@ const handlers: Record<string, PluginHandler> = {
   'tools.sleep': async (args: PluginArgs) => {
     await load();
     const action = readString(args, 'action', 'toggle');
-    const nextSleeping = action === 'sleep' ? true : action === 'wake' ? false : !state.sleeping;
-    if (nextSleeping !== state.sleeping) {
-      state.sleeping = nextSleeping;
-      if (overlayId) {
-        if (nextSleeping) {
-          const line = await speak(settings, 'sleep', state.mood);
-          await publishState('sleepStart', line.text);
-        } else {
-          const line = await speak(settings, 'wake', state.mood);
-          await publishState('sleepEnd', line.text);
-        }
-      }
-    }
-    return { ok: true, sleeping: state.sleeping };
+    return setSleeping(action === 'sleep' ? true : action === 'wake' ? false : !state.sleeping);
   },
 
   'tools.interact': async (args: PluginArgs) => interact(readString(args, 'kind', 'headpat'))

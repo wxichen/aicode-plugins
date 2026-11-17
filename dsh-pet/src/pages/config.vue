@@ -443,6 +443,14 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* 宿主 ui.css 只给个别组件设了 border-box，这里是页面级重置，避免 padding 撑出视口。 */
+.aicode-page,
+.aicode-page *,
+.aicode-page *::before,
+.aicode-page *::after {
+  box-sizing: border-box;
+}
+
 .aicode-page-header {
   gap: 12px;
 }

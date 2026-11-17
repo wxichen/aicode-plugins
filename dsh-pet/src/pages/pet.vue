@@ -35,7 +35,6 @@
       </div>
       <span v-if="state.sleeping" class="sleep-mark" aria-hidden="true">Z</span>
       <span v-if="state.mood <= 30" class="mood-mark" aria-hidden="true">…</span>
-      <span v-if="dragging" class="drag-mark" aria-hidden="true"></span>
     </div>
 
     <transition name="menu">
@@ -264,14 +263,15 @@ function showBubble(text: string): void {
 
 /**
  * 宿主的拖拽手柄会盖在页面声明的拖拽区域上并吃掉触摸，只把手势通过消息回传。
- * 菜单展开时把区域收为 0，让整个窗口的触摸直达页面，按钮才点得动。
+ * 手柄尺寸不能为 0（宿主会报 PARAM_INVALID），菜单展开时缩成一条 1px 的细缝，
+ * 把整个窗口的触摸都还给页面。
  */
 async function updateDragRegion(): Promise<void> {
   const stage = stageEl.value;
   if (!stage) return;
   const rect = stage.getBoundingClientRect();
   const region = menuOpen.value
-    ? { left: 0, top: 0, width: 0, height: 0 }
+    ? { left: rect.left, top: rect.top, width: 1, height: 1 }
     : { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
   await aicode.overlay.setDragRegion(region).catch(() => {});
 }
@@ -357,26 +357,32 @@ function closeMenu(): void {
   void updateDragRegion();
 }
 
-async function doInteract(kind: 'headpat' | 'feed'): Promise<void> {
-  closeMenu();
-  await aicode.invoke('ui.pet.interact', { kind }).catch(() => {});
+/**
+ * 浮层桥只提供 overlay.* / context / app.isForeground，没有 plugin.invoke，
+ * 需要副作用时一律用 overlay.postMessage 交给插件进程的 overlay.message。
+ */
+function request(type: string, extra: Record<string, unknown> = {}): void {
+  void aicode.overlay.postMessage({ type, ...extra }).catch(() => {});
 }
 
+async function doInteract(kind: 'headpat' | 'feed'): Promise<void> {
+  closeMenu();
+  request('pet.interact', { kind });
+}
 async function toggleSleep(): Promise<void> {
   closeMenu();
-  await aicode.invoke('tools.sleep', { action: 'toggle' }).catch(() => {});
+  request('pet.toggleSleep');
 }
 
 async function showSettingsTip(): Promise<void> {
   closeMenu();
-  await aicode
-    .tip({ text: '在「设置 → 插件 → AiCode 桌宠 → 插件配置」里修改桌宠设置。' })
-    .catch(() => {});
+  bubbleText.value = '';
+  showBubble('在「设置 → 插件 → AiCode 桌宠 → 插件配置」里修改设置。');
 }
 
 async function hidePet(): Promise<void> {
   closeMenu();
-  await aicode.invoke('ui.pet.hide').catch(() => {});
+  request('pet.hide');
 }
 
 onMounted(async () => {
@@ -430,8 +436,7 @@ button {
 }
 
 .pet-window.is-dragging .pet-placeholder,
-.pet-window.is-dragging .sleep-mark,
-.pet-window.is-dragging .drag-mark {
+.pet-window.is-dragging .sleep-mark {
   animation-play-state: paused;
 }
 
@@ -568,16 +573,9 @@ button {
   font-weight: 700;
 }
 
-.drag-mark {
-  position: absolute;
-  left: 50%;
-  bottom: -4px;
-  width: 26px;
-  height: 3px;
-  transform: translateX(-50%);
-  border-radius: 2px;
-  background: rgba(120, 132, 156, 0.55);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16);
+/* 拖动时只做一点极淡的整体下沉，不在脚下画任何线条。 */
+.pet-window.is-dragging .pet-stage {
+  transform: translateY(-2px);
 }
 
 /* 菜单固定在宠物下方的整行，落在拖拽区域之外，展开时也不会被手柄挡住。 */

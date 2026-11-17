@@ -241,6 +241,34 @@ async function run() {
     failures.push('保存内容未写入 data://config.json');
   }
 
+  const overlaySleep = await invokeHandler('overlay.message', {
+    overlayId: 'overlay-1',
+    payload: { type: 'pet.toggleSleep' }
+  });
+  if (!overlaySleep || overlaySleep.ok !== true || typeof overlaySleep.sleeping !== 'boolean') {
+    failures.push('浮层 pet.toggleSleep 未生效');
+  }
+
+  const overlayWake = await invokeHandler('overlay.message', {
+    overlayId: 'overlay-1',
+    payload: { type: 'pet.toggleSleep' }
+  });
+  if (!overlayWake || overlayWake.sleeping !== false) failures.push('浮层再次切换睡眠未生效');
+
+  const overlayInteract = await invokeHandler('overlay.message', {
+    overlayId: 'overlay-1',
+    payload: { type: 'pet.interact', kind: 'feed' }
+  });
+  if (!overlayInteract || overlayInteract.ok !== true) failures.push('浮层 pet.interact 未生效');
+
+  const overlayHide = await invokeHandler('overlay.message', {
+    overlayId: 'overlay-1',
+    payload: { type: 'pet.hide' }
+  });
+  if (!overlayHide || overlayHide.ok !== true) failures.push('浮层 pet.hide 未生效');
+  const enabledAfterHide = (await invokeHandler('ui.pet.state')).settings.pet.enabled;
+  if (enabledAfterHide !== false) failures.push('浮层 pet.hide 未关闭启用开关');
+
   const hidden = await invokeHandler('ui.pet.hide');
   if (!hidden || !hidden.settings || hidden.settings.pet.enabled !== false) failures.push('隐藏桌宠失败');
 
