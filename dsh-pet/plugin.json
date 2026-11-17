@@ -35,7 +35,7 @@
           "id": "pet",
           "page": "pages/pet.html",
           "width": 200,
-          "height": 170,
+          "height": 200,
           "draggable": true,
           "snap": "both"
         }

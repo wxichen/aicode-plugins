@@ -35,21 +35,19 @@
       </div>
       <span v-if="state.sleeping" class="sleep-mark" aria-hidden="true">Z</span>
       <span v-if="state.mood <= 30" class="mood-mark" aria-hidden="true">…</span>
-      <span v-if="dragging" class="drag-mark" aria-hidden="true">~</span>
+      <span v-if="dragging" class="drag-mark" aria-hidden="true"></span>
     </div>
 
-    <div class="action-bar" :class="{ open: menuOpen }">
-      <transition name="menu">
-        <div v-if="menuOpen" class="menu">
-          <button type="button" @click.stop="doInteract('headpat')">摸头</button>
-          <button type="button" @click.stop="doInteract('feed')">喂食</button>
-          <button type="button" @click.stop="toggleSleep">{{ state.sleeping ? '起床' : '睡觉' }}</button>
-          <button type="button" @click.stop="showSettingsTip">设置</button>
-          <button type="button" class="hide" @click.stop="hidePet">隐藏</button>
-          <button type="button" class="close" aria-label="收起菜单" @click.stop="menuOpen = false">×</button>
-        </div>
-      </transition>
-    </div>
+    <transition name="menu">
+      <div v-if="menuOpen" class="menu">
+        <button type="button" @click="doInteract('headpat')">摸头</button>
+        <button type="button" @click="doInteract('feed')">喂食</button>
+        <button type="button" @click="toggleSleep">{{ state.sleeping ? '起床' : '睡觉' }}</button>
+        <button type="button" @click="showSettingsTip">设置</button>
+        <button type="button" class="hide" @click="hidePet">隐藏</button>
+        <button type="button" class="close" aria-label="收起菜单" @click="closeMenu">×</button>
+      </div>
+    </transition>
   </div>
 </template>
 
@@ -67,7 +65,7 @@ import {
 } from '../shared/settings';
 
 const CREATE_WIDTH = 200;
-const CREATE_HEIGHT = 170;
+const CREATE_HEIGHT = 200;
 const BUBBLE_HEIGHT = 40;
 const ACTION_HEIGHT = 30;
 const SIDE_PADDING = 10;
@@ -264,14 +262,18 @@ function showBubble(text: string): void {
   }, Math.max(1500, settings.value.bubbleDurationMs));
 }
 
+/**
+ * 宿主的拖拽手柄会盖在页面声明的拖拽区域上并吃掉触摸，只把手势通过消息回传。
+ * 菜单展开时把区域收为 0，让整个窗口的触摸直达页面，按钮才点得动。
+ */
 async function updateDragRegion(): Promise<void> {
   const stage = stageEl.value;
   if (!stage) return;
   const rect = stage.getBoundingClientRect();
-  // 只把宠物本体交给宿主拖拽：菜单按钮必须留在手柄之外，否则触摸会被原生手柄吃掉。
-  await aicode.overlay
-    .setDragRegion({ left: rect.left, top: rect.top, width: rect.width, height: rect.height })
-    .catch(() => {});
+  const region = menuOpen.value
+    ? { left: 0, top: 0, width: 0, height: 0 }
+    : { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+  await aicode.overlay.setDragRegion(region).catch(() => {});
 }
 
 async function applySize(): Promise<void> {
@@ -284,8 +286,7 @@ async function applySize(): Promise<void> {
 
 async function applySettings(next: PetSettings): Promise<void> {
   settings.value = normalizeSettings(next);
-  await nextTick();
-  // 桌宠浮层始终悬浮在其它应用之上，设置关掉「置顶」时退回仅 App 前台可见。
+  await nextTick();  // 桌宠浮层始终悬浮在其它应用之上，设置关掉「置顶」时退回仅 App 前台可见。
   await aicode.overlay
     .setVisibilityPolicy(settings.value.pet.alwaysOnTop ? 'always' : 'foreground')
     .catch(() => {});
@@ -332,38 +333,49 @@ function onMessage(raw: OverlayMessage): void {
       void aicode.overlay.postMessage({ type: 'pet.click' }).catch(() => {});
     }
   } else if (message.type === 'longPress') {
-    menuOpen.value = true;
+    openMenu();
   } else if (message.type === 'dragStart') {
-    menuOpen.value = false;
+    closeMenu();
     dragging.value = true;
   } else if (message.type === 'dragEnd') {
     dragging.value = false;
   } else if (message.type === 'snap') {
     document.body.dataset.edge = String(message.edge ?? '');
   } else if (message.type === 'appState' && message.foreground === true) {
-    menuOpen.value = false;
+    closeMenu();
   }
 }
 
-async function doInteract(kind: 'headpat' | 'feed'): Promise<void> {
+function openMenu(): void {
+  menuOpen.value = true;
+  void updateDragRegion();
+}
+
+function closeMenu(): void {
+  if (!menuOpen.value) return;
   menuOpen.value = false;
+  void updateDragRegion();
+}
+
+async function doInteract(kind: 'headpat' | 'feed'): Promise<void> {
+  closeMenu();
   await aicode.invoke('ui.pet.interact', { kind }).catch(() => {});
 }
 
 async function toggleSleep(): Promise<void> {
-  menuOpen.value = false;
+  closeMenu();
   await aicode.invoke('tools.sleep', { action: 'toggle' }).catch(() => {});
 }
 
 async function showSettingsTip(): Promise<void> {
-  menuOpen.value = false;
+  closeMenu();
   await aicode
     .tip({ text: '在「设置 → 插件 → AiCode 桌宠 → 插件配置」里修改桌宠设置。' })
     .catch(() => {});
 }
 
 async function hidePet(): Promise<void> {
-  menuOpen.value = false;
+  closeMenu();
   await aicode.invoke('ui.pet.hide').catch(() => {});
 }
 
@@ -559,76 +571,50 @@ button {
 .drag-mark {
   position: absolute;
   left: 50%;
-  bottom: -2px;
+  bottom: -4px;
+  width: 26px;
+  height: 3px;
   transform: translateX(-50%);
-  color: var(--aicode-primary);
-  font-size: 16px;
-  font-weight: 700;
+  border-radius: 2px;
+  background: rgba(120, 132, 156, 0.55);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16);
 }
 
-.action-bar {
+/* 菜单固定在宠物下方的整行，落在拖拽区域之外，展开时也不会被手柄挡住。 */
+.menu {
   position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 0;
+  left: 8px;
+  right: 8px;
+  bottom: 4px;
   height: 30px;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-}
-
-.action-bar.open {
-  align-items: flex-end;
-  padding-bottom: 2px;
-}
-
-.menu-toggle {
-  pointer-events: auto;
-  width: 34px;
-  height: 20px;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: rgba(20, 24, 34, 0.28);
-  color: #fff;
-  font-size: 12px;
-  line-height: 20px;
-  letter-spacing: 1px;
-  opacity: 0.75;
-  cursor: pointer;
-}
-
-.menu {
-  width: 100%;
-  display: flex;
   gap: 4px;
-  pointer-events: auto;
 }
 
 .menu button {
   flex: 1;
-  height: 24px;
-  padding: 0 4px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 2px;
   border: 0;
-  border-radius: 7px;
-  background: rgba(20, 24, 34, 0.7);
+  border-radius: 9px;
+  background: rgba(20, 24, 34, 0.82);
   color: #fff;
-  font-size: 10px;
-  line-height: 24px;
+  font-size: 12px;
+  line-height: 30px;
   white-space: nowrap;
   cursor: pointer;
 }
 
 .menu button.hide {
-  background: rgba(160, 40, 50, 0.78);
+  background: rgba(170, 44, 56, 0.86);
 }
 
 .menu button.close {
   flex: none;
-  width: 24px;
-  background: rgba(20, 24, 34, 0.5);
-  font-size: 14px;
+  width: 26px;
+  background: rgba(20, 24, 34, 0.56);
+  font-size: 15px;
 }
 
 .bubble-enter-active,
