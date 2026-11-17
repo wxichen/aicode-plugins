@@ -1,5 +1,5 @@
 <template>
-  <div class="pet-window" :class="{ 'is-dragging': dragging }" :style="windowStyle">
+  <div class="pet-window" :class="{ 'is-dragging': dragging, 'is-sleeping': state.sleeping }" :style="windowStyle">
     <transition name="bubble">
       <div v-if="bubbleText" class="bubble" :class="{ sleeping: state.sleeping }">
         <span class="bubble-text">{{ bubbleText }}</span>
@@ -34,27 +34,21 @@
         <span class="mouth"></span>
       </div>
       <span v-if="state.sleeping" class="sleep-mark" aria-hidden="true">Z</span>
+      <span v-if="state.mood <= 30" class="mood-mark" aria-hidden="true">…</span>
       <span v-if="dragging" class="drag-mark" aria-hidden="true">~</span>
     </div>
 
-    <div class="action-bar">
+    <div class="action-bar" :class="{ open: menuOpen }">
       <transition name="menu">
         <div v-if="menuOpen" class="menu">
-          <button type="button" @click="doSay">说话</button>
-          <button type="button" @click="doAction">玩耍</button>
-          <button type="button" @click="toggleSleep">{{ state.sleeping ? '起床' : '睡觉' }}</button>
-          <button type="button" @click="showSettingsTip">设置</button>
-          <button type="button" class="hide" @click="hidePet">隐藏</button>
-          <button type="button" class="close" aria-label="收起菜单" @click="menuOpen = false">×</button>
+          <button type="button" @click.stop="doInteract('headpat')">摸头</button>
+          <button type="button" @click.stop="doInteract('feed')">喂食</button>
+          <button type="button" @click.stop="toggleSleep">{{ state.sleeping ? '起床' : '睡觉' }}</button>
+          <button type="button" @click.stop="showSettingsTip">设置</button>
+          <button type="button" class="hide" @click.stop="hidePet">隐藏</button>
+          <button type="button" class="close" aria-label="收起菜单" @click.stop="menuOpen = false">×</button>
         </div>
       </transition>
-      <button
-        v-if="!menuOpen"
-        class="menu-toggle"
-        type="button"
-        aria-label="桌宠菜单"
-        @click="menuOpen = true"
-      >···</button>
     </div>
   </div>
 </template>
@@ -65,6 +59,7 @@ import type { OverlayMessage } from '@jieapi/plugin-sdk/page';
 import { ANIMATION_ASSETS } from '../shared/animations';
 import {
   DEFAULT_SETTINGS,
+  MOOD_DEFAULT,
   normalizeSettings,
   type PetAnimation,
   type PetSettings,
@@ -74,13 +69,14 @@ import {
 const CREATE_WIDTH = 200;
 const CREATE_HEIGHT = 170;
 const BUBBLE_HEIGHT = 40;
-const ACTION_HEIGHT = 26;
+const ACTION_HEIGHT = 30;
 const SIDE_PADDING = 10;
 
 const state = ref<PetState>({
   sleeping: false,
   runActive: false,
   toolsActive: 0,
+  mood: MOOD_DEFAULT,
   lastAnimation: null,
   lastText: '',
   updatedAt: 0
@@ -104,15 +100,6 @@ let lastHeight = 0;
 const assetUrls = new Map<PetAnimation, string>();
 const layerAnimations: Array<PetAnimation | null> = [null, null];
 const layerReady: Array<Promise<void> | null> = [null, null];
-
-const whispers = [
-  '主人今天也要好好休息哦。',
-  '有点无聊，陪我玩一会儿嘛。',
-  '写代码别忘了喝水呀。',
-  '我在这儿看着你呢。',
-  '要不要摸摸我的头？'
-];
-let whisperIndex = 0;
 
 function videoOf(index: number): HTMLVideoElement | null {
   return index === 0 ? videoA.value : videoB.value;
@@ -142,6 +129,11 @@ const stageStyle = computed(() => ({
   width: petSize.value + 'px',
   height: petHeight.value + 'px'
 }));
+
+/** 心情低时待机动作换成东张西望，避免一直是同一段呼吸动画。 */
+function idleAnimation(): PetAnimation {
+  return state.value.mood <= 30 ? settings.value.animations.turn : settings.value.animations.idle;
+}
 
 function waitReady(video: HTMLVideoElement): Promise<void> {
   if (video.readyState >= 2) return Promise.resolve();
@@ -218,11 +210,11 @@ function onVideoEnded(index: number): void {
     return;
   }
   if (animation === 'sleepEnd') {
-    void playAnimation(settings.value.animations.idle);
+    void playAnimation(idleAnimation());
     return;
   }
-  if (['click', 'action', 'success', 'error'].includes(animation)) {
-    void playAnimation(settings.value.animations.idle);
+  if (['click', 'action', 'success', 'error', 'turn'].includes(animation)) {
+    void playAnimation(idleAnimation());
   }
 }
 
@@ -239,6 +231,29 @@ function parseMessage(raw: OverlayMessage): Record<string, unknown> {
   return raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
 }
 
+let audioCtx: AudioContext | null = null;
+
+/** 点击音效用 WebAudio 现场合成，包内没有音频素材，也避免额外解码开销。 */
+function playClickSound(): void {
+  if (!settings.value.pet.clickSound) return;
+  try {
+    audioCtx = audioCtx ?? new AudioContext();
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, now);
+    osc.frequency.exponentialRampToValueAtTime(1320, now + 0.08);
+    gain.gain.setValueAtTime(0.12, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.14);
+  } catch {
+    // 浮层没有音频焦点时静默跳过。
+  }
+}
+
 function showBubble(text: string): void {
   if (!text) return;
   bubbleText.value = text.slice(0, 240);
@@ -253,6 +268,7 @@ async function updateDragRegion(): Promise<void> {
   const stage = stageEl.value;
   if (!stage) return;
   const rect = stage.getBoundingClientRect();
+  // 只把宠物本体交给宿主拖拽：菜单按钮必须留在手柄之外，否则触摸会被原生手柄吃掉。
   await aicode.overlay
     .setDragRegion({ left: rect.left, top: rect.top, width: rect.width, height: rect.height })
     .catch(() => {});
@@ -269,9 +285,13 @@ async function applySize(): Promise<void> {
 async function applySettings(next: PetSettings): Promise<void> {
   settings.value = normalizeSettings(next);
   await nextTick();
+  // 桌宠浮层始终悬浮在其它应用之上，设置关掉「置顶」时退回仅 App 前台可见。
+  await aicode.overlay
+    .setVisibilityPolicy(settings.value.pet.alwaysOnTop ? 'always' : 'foreground')
+    .catch(() => {});
   await applySize();
   if (currentAnimation === null || !ANIMATION_ASSETS[currentAnimation]) {
-    await playAnimation(settings.value.animations.idle, true);
+    await playAnimation(idleAnimation(), true);
   }
 }
 
@@ -279,16 +299,22 @@ function applyState(next: PetState): void {
   const previous = state.value;
   const animationChanged = next.lastAnimation !== previous.lastAnimation;
   const textChanged = (next.lastText || '') !== (previous.lastText || '');
+  const moodDropped = typeof next.mood === 'number' && next.mood <= 30 && previous.mood > 30;
   state.value = {
     sleeping: next.sleeping === true,
     runActive: next.runActive === true,
     toolsActive: typeof next.toolsActive === 'number' ? next.toolsActive : 0,
+    mood: typeof next.mood === 'number' ? next.mood : MOOD_DEFAULT,
     lastAnimation: (next.lastAnimation as PetAnimation | null) ?? null,
     lastText: typeof next.lastText === 'string' ? next.lastText : '',
     updatedAt: typeof next.updatedAt === 'number' ? next.updatedAt : Date.now()
   };
   if (textChanged && state.value.lastText) showBubble(state.value.lastText);
-  if (animationChanged && state.value.lastAnimation) void playAnimation(state.value.lastAnimation, true);
+  if (animationChanged && state.value.lastAnimation) {
+    void playAnimation(state.value.lastAnimation, true);
+  } else if (moodDropped && !state.value.runActive && !state.value.sleeping) {
+    void playAnimation(settings.value.animations.turn);
+  }
 }
 
 function onMessage(raw: OverlayMessage): void {
@@ -302,6 +328,7 @@ function onMessage(raw: OverlayMessage): void {
     if (state.value.sleeping) {
       showBubble('唔……我在睡觉呢。');
     } else {
+      playClickSound();
       void aicode.overlay.postMessage({ type: 'pet.click' }).catch(() => {});
     }
   } else if (message.type === 'longPress') {
@@ -318,16 +345,9 @@ function onMessage(raw: OverlayMessage): void {
   }
 }
 
-async function doSay(): Promise<void> {
+async function doInteract(kind: 'headpat' | 'feed'): Promise<void> {
   menuOpen.value = false;
-  const text = whispers[whisperIndex % whispers.length];
-  whisperIndex += 1;
-  await aicode.invoke('ui.pet.say', { text }).catch(() => {});
-}
-
-async function doAction(): Promise<void> {
-  menuOpen.value = false;
-  await aicode.invoke('ui.pet.play', { animation: 'action' }).catch(() => {});
+  await aicode.invoke('ui.pet.interact', { kind }).catch(() => {});
 }
 
 async function toggleSleep(): Promise<void> {
@@ -358,6 +378,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (offMessage) offMessage();
   if (bubbleTimer) clearTimeout(bubbleTimer);
+  void audioCtx?.close().catch(() => {});
+  audioCtx = null;
   videoA.value?.pause();
   videoB.value?.pause();
   videoA.value?.removeAttribute('src');
@@ -525,6 +547,15 @@ button {
   animation: sleep-float 2.6s ease-in-out infinite;
 }
 
+.mood-mark {
+  position: absolute;
+  left: 2px;
+  top: -4px;
+  color: var(--aicode-on-surface-variant);
+  font-size: calc(16px * var(--aicode-font-scale));
+  font-weight: 700;
+}
+
 .drag-mark {
   position: absolute;
   left: 50%;
@@ -540,24 +571,31 @@ button {
   left: 10px;
   right: 10px;
   bottom: 0;
-  height: 26px;
+  height: 30px;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: center;
   pointer-events: none;
+}
+
+.action-bar.open {
+  align-items: flex-end;
+  padding-bottom: 2px;
 }
 
 .menu-toggle {
   pointer-events: auto;
-  width: 30px;
-  height: 22px;
+  width: 34px;
+  height: 20px;
   padding: 0;
   border: 0;
   border-radius: 8px;
-  background: rgba(20, 24, 34, 0.42);
+  background: rgba(20, 24, 34, 0.28);
   color: #fff;
-  font-size: 14px;
-  line-height: 22px;
+  font-size: 12px;
+  line-height: 20px;
+  letter-spacing: 1px;
+  opacity: 0.75;
   cursor: pointer;
 }
 

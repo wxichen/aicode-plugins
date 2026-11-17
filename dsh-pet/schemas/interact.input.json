@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "kind": {
+      "type": "string",
+      "description": "headpat 摸头、feed 喂食、cheer 求鼓励",
+      "enum": ["headpat", "feed", "cheer"]
+    }
+  },
+  "required": ["kind"]
+}

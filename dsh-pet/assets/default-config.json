@@ -8,9 +8,15 @@
   },
   "petName": "蓝毛小女仆",
   "persona": "你是主人手机上的 Q 版蓝发小女仆桌宠。说话温柔、俏皮、简短，不提自己是 AI。",
+  "voice": {
+    "mode": "auto",
+    "providerId": "",
+    "model": ""
+  },
   "bubbleDurationMs": 6000,
   "idleWhisper": false,
   "whisperIntervalMinutes": 30,
+  "idleTurn": true,
   "notifyOnRunFinished": true,
   "notifyOnToolError": true,
   "workStatusEnabled": true,
@@ -21,6 +27,7 @@
     "drag": "drag",
     "action": "action",
     "work": "thinking",
+    "busy": "working",
     "success": "success",
     "error": "error"
   }

@@ -1,16 +1,17 @@
 {
+  "$schema": "https://raw.githubusercontent.com/jieapi/AiCode/main/plugins/schema/plugin.schema.json",
   "manifestVersion": 1,
   "id": "wxichen.dsh-pet",
   "name": {
     "default": "DSH Pet",
     "zh-CN": "AiCode 桌宠"
   },
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "wxichen",
   "repository": "https://github.com/wxichen/aicode-plugins",
   "description": {
-    "default": "A floating desktop pet adapted from dsh-pet for AiCode. It plays transparent animations, reacts to AiCode runs, accepts chat prompts and can be controlled by AI tools.",
-    "zh-CN": "将 dsh-pet 适配到 AiCode 的悬浮桌宠：播放透明动画、响应 AiCode 运行状态、写入聊天提示词，并支持 AI 工具控制。"
+    "default": "A floating desktop pet adapted from dsh-pet for AiCode. It plays transparent animations, reacts to AiCode runs, speaks lines generated from a persona, and can be controlled by AI tools.",
+    "zh-CN": "将 dsh-pet 适配到 AiCode 的悬浮桌宠：播放透明动画、响应 AiCode 运行状态、按人设生成台词，并支持 AI 工具控制与摸头喂食互动。"
   },
   "license": "MIT",
   "icon": "assets/logo.png",
@@ -23,6 +24,9 @@
     "resident": true
   },
   "contributes": {
+    "modelAccess": {
+      "purpose": "按使用者配置的人设，为桌宠生成气泡台词与状态反馈"
+    },
     "configPage": "pages/config.html",
     "overlay": {
       "purpose": "显示 AiCode 桌宠、运行状态和交互气泡",
@@ -59,6 +63,11 @@
         "id": "enabled",
         "event": "plugin.enabled",
         "handler": "hooks.enabled"
+      },
+      {
+        "id": "disabled",
+        "event": "plugin.disabled",
+        "handler": "hooks.disabled"
       },
       {
         "id": "run-started",
@@ -120,6 +129,19 @@
         },
         "inputSchema": "schemas/sleep.input.json",
         "handler": "tools.sleep"
+      },
+      {
+        "id": "interact",
+        "title": {
+          "default": "Interact With Pet",
+          "zh-CN": "和桌宠互动"
+        },
+        "description": {
+          "default": "Pet or feed the floating pet, or ask it to cheer you up. Raises its mood and shows a response line.",
+          "zh-CN": "摸头、喂食或请桌宠说句鼓励的话，会提升心情值并显示一句回应。"
+        },
+        "inputSchema": "schemas/interact.input.json",
+        "handler": "tools.interact"
       }
     ]
   }

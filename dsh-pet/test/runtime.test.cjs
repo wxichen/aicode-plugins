@@ -46,6 +46,38 @@ hostHandlers.set('host.notify', async (params) => {
   calls.push({ notify: params });
   return { ok: true };
 });
+hostHandlers.set('host.model.listProviders', async () => ({
+  providers: [
+    {
+      id: 'fake',
+      name: 'Fake',
+      type: 'openai',
+      enabled: true,
+      hasKey: true,
+      isPlugin: false,
+      isDefault: true,
+      defaultModel: 'fake-chat',
+      selectedModel: 'fake-chat',
+      modelCount: 1
+    }
+  ]
+}));
+hostHandlers.set('host.model.listModels', async () => ({
+  providerId: 'fake',
+  models: [{ id: 'fake-chat', displayName: 'Fake Chat', modelType: 'chat' }]
+}));
+hostHandlers.set('host.model.create', async () => ({ handle: { id: 'handle-1', providerId: 'fake', model: 'fake-chat' } }));
+hostHandlers.set('host.model.start', async (params) => {
+  calls.push({ prompt: params.messages[0].content });
+  return { streamId: 'stream-1' };
+});
+hostHandlers.set('host.model.read', async () => ({
+  cursor: 1,
+  done: true,
+  status: 'success',
+  final: { content: '模型生成的一句台词。' }
+}));
+hostHandlers.set('host.model.close', async () => ({ ok: true }));
 
 child.stdout.setEncoding('utf8');
 child.stdout.on('data', (chunk) => {
@@ -164,11 +196,42 @@ async function run() {
   const runStart = await invokeHandler('hooks.runStarted', { sessionId: 's1' });
   if (!runStart || runStart.ok !== true) failures.push('hooks.runStarted 失败');
 
+  const busyStart = await invokeHandler('hooks.toolStarted', { sessionId: 's1', callId: 'c1', toolName: 'readFile' });
+  if (!busyStart || busyStart.ok !== true) failures.push('hooks.toolStarted 失败');
+
+  const secondTool = await invokeHandler('hooks.toolStarted', { sessionId: 's1', callId: 'c2', toolName: 'writeFile' });
+  if (!secondTool || secondTool.ok !== true) failures.push('第二个 hooks.toolStarted 失败');
+  const busyPushed = await waitFor(() =>
+    calls.some((item) => item.overlay && item.overlay.type === 'pet.state' && item.overlay.state.lastAnimation === 'working')
+  );
+  if (!busyPushed) failures.push('工具并发时未切换到忙碌动画');
+
+  const toolDone = await invokeHandler('hooks.toolFinished', { sessionId: 's1', callId: 'c2', toolName: 'writeFile', status: 'success' });
+  if (!toolDone || toolDone.ok !== true) failures.push('hooks.toolFinished 失败');
+
   const runFinish = await invokeHandler('hooks.runFinished', { sessionId: 's1', status: 'success' });
   if (!runFinish || runFinish.ok !== true) failures.push('hooks.runFinished 失败');
 
   const notified = await waitFor(() => calls.some((item) => item.notify));
   if (!notified) failures.push('run.finished 未通知');
+
+  const modelLine = await waitFor(() =>
+    calls.some((item) => item.overlay && item.overlay.type === 'pet.state' && item.overlay.state.lastText === '模型生成的一句台词。')
+  );
+  if (!modelLine) failures.push('未采用模型生成的台词');
+  const prompted = calls.some((item) => typeof item.prompt === 'string' && item.prompt.includes('成功'));
+  if (!prompted) failures.push('模型提示词未描述本次状态');
+
+  const moodBefore = (await invokeHandler('ui.pet.state')).state.mood;
+  const patted = await invokeHandler('tools.interact', { kind: 'headpat' });
+  if (!patted || patted.ok !== true) failures.push('tools.interact 失败');
+  if (typeof patted.mood === 'number' && patted.mood <= moodBefore) failures.push('摸头未提升心情值');
+
+  const unknownInteraction = await invokeHandler('overlay.message', {
+    overlayId: 'overlay-1',
+    payload: { type: 'pet.interact', kind: 'nope' }
+  });
+  if (!unknownInteraction || unknownInteraction.ok !== false) failures.push('未知互动未返回失败');
 
   const saved = await invokeHandler('ui.settings.save', {
     settings: { ...state.settings, petName: '保存后的桌宠', pet: { ...state.settings.pet, size: 240 } }
@@ -194,7 +257,7 @@ async function run() {
   console.log(
     JSON.stringify(
       {
-        handlers: 12,
+        handlers: 17,
         hostCalls: calls.length,
         savedConfigName: saved.settings.petName,
         overlayOpenAfterHide: hidden.settings.pet.enabled,

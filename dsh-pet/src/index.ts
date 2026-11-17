@@ -1,22 +1,32 @@
-import { definePlugin, hostCall, emit, type PluginArgs, type PluginHandler } from '@aicode/plugin-sdk';
+import { definePlugin, hostCall, emit, type PluginArgs, type PluginHandler } from '@jieapi/plugin-sdk';
 import {
   DEFAULT_SETTINGS,
+  MOOD_DEFAULT,
+  clampMood,
   normalizeSettings,
   type PetAnimation,
   type PetSettings,
   type PetState
 } from './shared/settings';
+import { INTERACTIONS } from './shared/voice';
+import { listVoiceOptions, speak, voiceRequested } from './voiceGen';
 
 const CONFIG_PATH = 'data://config.json';
 const STATE_PATH = 'data://state.json';
 const PET_SURFACE = 'pet';
 const CREATE_WIDTH = 200;
 const CREATE_HEIGHT = 170;
+const IDLE_TURN_MIN_MS = 25_000;
+const IDLE_TURN_MAX_MS = 70_000;
+const MOOD_DRIFT_MS = 10 * 60_000;
+const MOOD_DRIFT_STEP = 2;
+const MOOD_WORK_COST = 1;
 
 const state: PetState = {
   sleeping: false,
   runActive: false,
   toolsActive: 0,
+  mood: MOOD_DEFAULT,
   lastAnimation: null,
   lastText: '',
   updatedAt: Date.now()
@@ -28,6 +38,8 @@ let loadPromise: Promise<void> | null = null;
 let overlayId: string | null = null;
 let overlayPromise: Promise<string> | null = null;
 let idleTimer: ReturnType<typeof setInterval> | null = null;
+let turnTimer: ReturnType<typeof setTimeout> | null = null;
+let moodTimer: ReturnType<typeof setInterval> | null = null;
 let launchError = '';
 
 function errorCode(error: unknown): string | undefined {
@@ -54,6 +66,7 @@ function statePayload(): Record<string, unknown> {
     sleeping: state.sleeping,
     runActive: state.runActive,
     toolsActive: state.toolsActive,
+    mood: state.mood,
     lastAnimation: state.lastAnimation,
     lastText: state.lastText,
     updatedAt: state.updatedAt
@@ -74,6 +87,7 @@ async function loadState(): Promise<void> {
       state.sleeping = saved.sleeping === true;
       state.runActive = saved.runActive === true;
       state.toolsActive = typeof saved.toolsActive === 'number' ? saved.toolsActive : 0;
+      state.mood = typeof saved.mood === 'number' ? clampMood(saved.mood) : MOOD_DEFAULT;
       state.lastAnimation = (saved.lastAnimation as PetAnimation | null) ?? null;
       state.lastText = typeof saved.lastText === 'string' ? saved.lastText : '';
       state.updatedAt = typeof saved.updatedAt === 'number' ? saved.updatedAt : Date.now();
@@ -148,13 +162,19 @@ async function postOverlay(payload: Record<string, unknown>): Promise<void> {
 }
 
 async function publishSettings(): Promise<void> {
-  await postOverlay({ type: 'pet.settings', settings: settingsPayload() });
+  await postOverlay({
+    type: 'pet.settings',
+    settings: settingsPayload()
+  });
 }
 
 async function publishState(animation?: PetAnimation, text?: string): Promise<void> {
+  const changed =
+    (animation !== undefined && animation !== state.lastAnimation) ||
+    (text !== undefined && text !== state.lastText);
   if (animation) state.lastAnimation = animation;
   if (text !== undefined) state.lastText = text;
-  persistState();
+  if (changed) persistState();
   await postOverlay({ type: 'pet.state', state: statePayload() });
 }
 
@@ -172,27 +192,66 @@ function stopIdleWhisper(): void {
   }
 }
 
-const WHISPERS = [
-  '主人今天也要好好休息哦。',
-  '有点无聊，陪我玩一会儿嘛。',
-  '写代码别忘了喝水呀。',
-  '我在这儿看着你呢。',
-  '要不要摸摸我的头？'
-];
-let whisperCursor = 0;
+function stopIdleTurn(): void {
+  if (turnTimer) {
+    clearTimeout(turnTimer);
+    turnTimer = null;
+  }
+}
+
+function stopMoodDrift(): void {
+  if (moodTimer) {
+    clearInterval(moodTimer);
+    moodTimer = null;
+  }
+}
+
+function canPoke(): boolean {
+  return Boolean(overlayId) && !state.sleeping && !state.runActive;
+}
+
+function scheduleIdleTurn(): void {
+  stopIdleTurn();
+  if (!settings.idleTurn) return;
+  const delay = IDLE_TURN_MIN_MS + Math.random() * (IDLE_TURN_MAX_MS - IDLE_TURN_MIN_MS);
+  turnTimer = setTimeout(() => {
+    turnTimer = null;
+    scheduleIdleTurn();
+    if (!canPoke()) return;
+    void publishState(settings.animations.turn).catch(() => {});
+  }, delay);
+}
 
 function startIdleWhisper(): void {
   stopIdleWhisper();
   if (!settings.idleWhisper) return;
   const intervalMs = Math.max(60_000, settings.whisperIntervalMinutes * 60_000);
   idleTimer = setInterval(() => {
-    if (!overlayId || state.sleeping || state.runActive) return;
-    const text = WHISPERS[whisperCursor % WHISPERS.length];
-    whisperCursor += 1;
-    void publishState(settings.animations.action, text).catch(() => {});
+    if (!canPoke()) return;
+    void whisper().catch(() => {});
   }, intervalMs);
 }
 
+function startMoodDrift(): void {
+  stopMoodDrift();
+  moodTimer = setInterval(() => {
+    if (state.sleeping) return;
+    const before = state.mood;
+    state.mood = clampMood(before + (state.mood < 50 ? MOOD_DRIFT_STEP : -MOOD_DRIFT_STEP));
+    if (state.mood !== before) void publishState().catch(() => {});
+  }, MOOD_DRIFT_MS);
+}
+
+function startTimers(): void {
+  startIdleWhisper();
+  scheduleIdleTurn();
+  startMoodDrift();
+}
+
+async function whisper(): Promise<void> {
+  const line = await speak(settings, 'idle', state.mood);
+  await publishState(state.mood < 30 ? settings.animations.turn : settings.animations.action, line.text);
+}
 async function openPet(): Promise<{ ok: boolean; overlayId?: string; code?: string; message?: string }> {
   await load();
   try {
@@ -207,13 +266,38 @@ async function openPet(): Promise<{ ok: boolean; overlayId?: string; code?: stri
   }
 }
 
+/**
+ * 按当前开关同步浮层：关掉「启用桌宠」要真的移除窗口，
+ * 由关变开时也要真的创建出来，而不是只把配置推给一个并不存在的浮层。
+ */
+async function applyEnabledState(reveal: boolean): Promise<{ opened: boolean; closed: boolean }> {
+  if (!settings.pet.enabled) {
+    stopIdleWhisper();
+    stopIdleTurn();
+    await closeOverlay();
+    return { opened: false, closed: true };
+  }
+  if (overlayId) {
+    await publishSettings();
+    await publishState(state.lastAnimation ?? settings.animations.idle, state.lastText);
+    startTimers();
+    return { opened: false, closed: false };
+  }
+  startTimers();
+  if (!reveal) return { opened: false, closed: false };
+  const result = await openPet();
+  return { opened: result.ok, closed: false };
+}
+
 async function startAutomatically(): Promise<void> {
   await load();
-  startIdleWhisper();
-  if (!settings.pet.enabled || !settings.pet.autoStart) {
+  startTimers();
+  // autoStart 只决定启动时是否自动创建，不影响使用者手动显示出来的桌宠。
+  if (!settings.pet.enabled) {
     await closeOverlay();
     return;
   }
+  if (!settings.pet.autoStart) return;
   const opened = await openPet();
   if (opened.ok) return;
   // 浮层授权或系统权限未开启时保持安静：用户在插件详情授权后再打开设置页即可重新显示。
@@ -238,6 +322,21 @@ async function say(text: string, animation?: PetAnimation): Promise<void> {
   await play(animation ?? 'say', text);
 }
 
+async function interact(kind: string): Promise<{ ok: boolean; mood: number; text: string; source: string }> {
+  const spec = INTERACTIONS[kind];
+  if (!spec) throw new Error(`未知互动：${kind}`);
+  await load();
+  if (!overlayId) {
+    const opened = await openPet();
+    if (!opened.ok) throw new Error(opened.message || opened.code || '桌宠浮层不可用');
+  }
+  if (state.sleeping) throw new Error('桌宠正在睡觉，请先叫醒它');
+  const line = await speak(settings, spec.kind, state.mood);
+  state.mood = clampMood(state.mood + spec.moodDelta);
+  await publishState(spec.animation, line.text);
+  return { ok: true, mood: state.mood, text: line.text, source: line.source };
+}
+
 const handlers: Record<string, PluginHandler> = {
   'hooks.boot': async () => {
     await startAutomatically();
@@ -246,6 +345,14 @@ const handlers: Record<string, PluginHandler> = {
 
   'hooks.enabled': async () => {
     await startAutomatically();
+    return { ok: true };
+  },
+
+  'hooks.disabled': async () => {
+    stopIdleWhisper();
+    stopIdleTurn();
+    stopMoodDrift();
+    await closeOverlay();
     return { ok: true };
   },
 
@@ -263,7 +370,12 @@ const handlers: Record<string, PluginHandler> = {
     state.runActive = true;
     state.toolsActive += 1;
     if (!overlayId) return { ok: true };
-    await publishState(settings.workStatusEnabled ? settings.animations.work : state.lastAnimation ?? 'idle');
+    const animation = !settings.workStatusEnabled
+      ? state.lastAnimation ?? 'idle'
+      : state.toolsActive > 1
+        ? settings.animations.busy
+        : settings.animations.work;
+    await publishState(animation);
     return { ok: true };
   },
 
@@ -271,7 +383,9 @@ const handlers: Record<string, PluginHandler> = {
     await load();
     state.toolsActive = Math.max(0, state.toolsActive - 1);
     if (!overlayId || !settings.workStatusEnabled) return { ok: true };
-    await publishState(readString(args, 'status') === 'error' ? settings.animations.error : settings.animations.action);
+    const failed = readString(args, 'status') === 'error';
+    state.mood = clampMood(state.mood - MOOD_WORK_COST * (failed ? 2 : 1));
+    await publishState(failed ? settings.animations.error : state.toolsActive > 0 ? settings.animations.busy : settings.animations.work);
     return { ok: true };
   },
 
@@ -282,7 +396,9 @@ const handlers: Record<string, PluginHandler> = {
     const status = readString(args, 'status', 'success');
     const succeeded = status === 'success';
     if (overlayId && settings.workStatusEnabled) {
-      await publishState(succeeded ? settings.animations.success : settings.animations.error);
+      state.mood = clampMood(state.mood + (succeeded ? 6 : -4));
+      const line = await speak(settings, succeeded ? 'success' : 'error', state.mood);
+      await publishState(succeeded ? settings.animations.success : settings.animations.error, line.text);
     }
     if (succeeded ? settings.notifyOnRunFinished : settings.notifyOnToolError) {
       await hostCall('host.notify', {
@@ -308,14 +424,12 @@ const handlers: Record<string, PluginHandler> = {
       if (state.sleeping) {
         await publishState('sleepLoop', '唔……我在睡觉呢。');
       } else {
+        state.mood = clampMood(state.mood + 1);
         await publishState(settings.animations.click);
       }
       return { ok: true };
     }
-    if (type === 'pet.dragStart') {
-      return { ok: true };
-    }
-    if (type === 'pet.dragEnd') {
+    if (type === 'pet.dragStart' || type === 'pet.dragEnd') {
       return { ok: true };
     }
     if (type === 'pet.action') {
@@ -326,6 +440,14 @@ const handlers: Record<string, PluginHandler> = {
     if (type === 'pet.say') {
       await say(readString(payload, 'text', '嗯？'));
       return { ok: true };
+    }
+    if (type === 'pet.interact') {
+      const kind = readString(payload, 'kind');
+      try {
+        return await interact(kind);
+      } catch (error) {
+        return { ok: false, message: errorMessage(error) };
+      }
     }
     if (type === 'pet.refresh') {
       await publishSettings();
@@ -342,36 +464,33 @@ const handlers: Record<string, PluginHandler> = {
 
   'ui.settings.save': async (args: PluginArgs) => {
     await load();
+    const wasEnabled = settings.pet.enabled;
     settings = normalizeSettings(args.settings);
     await persistSettings();
-    startIdleWhisper();
-    if (overlayId) {
-      await publishSettings();
-      await publishState(state.lastAnimation ?? settings.animations.idle, state.lastText);
-    }
-    return { settings };
+    const result = await applyEnabledState(!wasEnabled && settings.pet.enabled);
+    return { settings, launchError: launchError || null, overlayOpen: overlayId !== null, ...result };
   },
 
   'ui.settings.reset': async () => {
     await load();
+    const wasEnabled = settings.pet.enabled;
     settings = normalizeSettings(DEFAULT_SETTINGS);
     await persistSettings();
-    startIdleWhisper();
-    if (overlayId) {
-      await publishSettings();
-      await publishState(settings.animations.idle, '');
-    }
-    return { settings };
+    const result = await applyEnabledState(!wasEnabled && settings.pet.enabled);
+    return { settings, launchError: launchError || null, overlayOpen: overlayId !== null, ...result };
   },
+
+  'ui.voice.options': async () => listVoiceOptions(),
 
   'ui.pet.open': async () => openPet(),
 
   'ui.pet.show': async () => {
     await load();
-    settings = { ...settings, pet: { ...settings.pet, enabled: true, autoStart: true } };
+    // 浮层页面的「设置」提示会引导到配置页，这里只恢复显示，不强制改 autoStart。
+    settings = { ...settings, pet: { ...settings.pet, enabled: true } };
     await persistSettings();
-    startIdleWhisper();
-    return { settings };
+    const result = await applyEnabledState(true);
+    return { settings, launchError: launchError || null, overlayOpen: overlayId !== null, ...result };
   },
 
   'ui.pet.hide': async () => {
@@ -379,24 +498,35 @@ const handlers: Record<string, PluginHandler> = {
     settings = { ...settings, pet: { ...settings.pet, enabled: false } };
     await persistSettings();
     stopIdleWhisper();
+    stopIdleTurn();
     await closeOverlay();
-    return { settings };
+    return { settings, overlayOpen: false };
   },
 
   'ui.pet.state': async () => {
     await load();
-    return { settings, state, launchError: launchError || null, overlayOpen: overlayId !== null };
+    return {
+      settings,
+      state,
+      launchError: launchError || null,
+      overlayOpen: overlayId !== null,
+      voiceActive: voiceRequested(settings)
+    };
   },
 
-  'ui.pet.say': async (args: PluginArgs) => {
-    await say(readString(args, 'text', '你好呀。'));
-    return { ok: true };
+  'ui.pet.say': async () => {
+    await load();
+    const line = await speak(settings, 'greet', state.mood);
+    await say(line.text);
+    return { ok: true, text: line.text, source: line.source };
   },
 
   'ui.pet.play': async (args: PluginArgs) => {
     await play(readString(args, 'animation', 'action') as PetAnimation);
     return { ok: true };
   },
+
+  'ui.pet.interact': async (args: PluginArgs) => interact(readString(args, 'kind')),
 
   'tools.say': async (args: PluginArgs) => {
     const text = readString(args, 'text');
@@ -420,14 +550,18 @@ const handlers: Record<string, PluginHandler> = {
       state.sleeping = nextSleeping;
       if (overlayId) {
         if (nextSleeping) {
-          await publishState('sleepStart', '晚安……');
+          const line = await speak(settings, 'sleep', state.mood);
+          await publishState('sleepStart', line.text);
         } else {
-          await publishState('sleepEnd', '我醒啦！');
+          const line = await speak(settings, 'wake', state.mood);
+          await publishState('sleepEnd', line.text);
         }
       }
     }
     return { ok: true, sleeping: state.sleeping };
-  }
+  },
+
+  'tools.interact': async (args: PluginArgs) => interact(readString(args, 'kind', 'headpat'))
 };
 
 definePlugin({ handlers });
