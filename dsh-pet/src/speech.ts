@@ -223,3 +223,60 @@ export async function synthesize(settings: PetSettings, text: string): Promise<S
   const durationHintMs = Math.min(30_000, Math.max(800, Math.round(input.length * 220)));
   return { url, mimeType: normalized.mimeType, durationHintMs };
 }
+
+/**
+ * 从使用者已在 AiCode 配好的供应商推断 TTS 预设。
+ *
+ * 宿主只暴露 id/name/type/defaultModel，且明确不返回 baseUrl 与 Key，
+ * 所以这里只能带入「供应商类型、默认地址、可用模型」，Key 仍需单独保存一次。
+ */
+export interface TtsPreset {
+  providerId: string;
+  providerName: string;
+  tts: Pick<TtsSettings, 'provider' | 'baseUrl' | 'model'>;
+  /** 该供应商是否已配置可用的 Key（仅供参考，插件读不到 Key 本身）。 */
+  hasKey: boolean;
+}
+
+interface ListedProvider {
+  id: string;
+  name: string;
+  type: string;
+  enabled: boolean;
+  hasKey: boolean;
+  isPlugin: boolean;
+  defaultModel: string;
+}
+
+function presetFor(provider: ListedProvider): TtsPreset['tts'] | null {
+  const type = provider.type.toLowerCase();
+  if (type === 'google' || type === 'gemini') {
+    return { provider: 'gemini', baseUrl: '', model: DEFAULT_GEMINI_MODEL };
+  }
+  // OpenAI 兼容协议是绝大多数第三方站点的形态（xAI、DeepSeek、Groq 等）。
+  if (type === 'openai' || type === 'openai-compatible' || type === 'custom') {
+    return { provider: 'openai', baseUrl: '', model: DEFAULT_OPENAI_MODEL };
+  }
+  return null;
+}
+
+export async function listTtsPresets(): Promise<{ presets: TtsPreset[]; error: string | null }> {
+  try {
+    const result = await hostCall<{ providers: ListedProvider[] }>('host.model.listProviders');
+    const presets: TtsPreset[] = [];
+    for (const provider of result.providers) {
+      if (!provider.enabled || provider.isPlugin) continue;
+      const tts = presetFor(provider);
+      if (!tts) continue;
+      presets.push({
+        providerId: provider.id,
+        providerName: provider.name,
+        tts,
+        hasKey: provider.hasKey
+      });
+    }
+    return { presets, error: null };
+  } catch (error) {
+    return { presets: [], error: error instanceof Error ? error.message : String(error) };
+  }
+}

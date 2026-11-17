@@ -10,7 +10,7 @@ import {
 } from './shared/settings';
 import { INTERACTIONS } from './shared/voice';
 import { listVoiceOptions, speak, voiceRequested } from './voiceGen';
-import { saveTtsKey, synthesize, ttsKeyPresent } from './speech';
+import { saveTtsKey, synthesize, ttsKeyPresent, listTtsPresets } from './speech';
 
 const CONFIG_PATH = 'data://config.json';
 const STATE_PATH = 'data://state.json';
@@ -528,6 +528,8 @@ const handlers: Record<string, PluginHandler> = {
   },
 
   'ui.voice.options': async () => listVoiceOptions(),
+
+  'ui.tts.presets': async () => listTtsPresets(),
 
   'ui.tts.state': async () => {
     await load();

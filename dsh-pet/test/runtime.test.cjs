@@ -56,6 +56,7 @@ hostHandlers.set('host.model.listProviders', async () => ({
       enabled: true,
       hasKey: true,
       isPlugin: false,
+      type: 'openai',
       isDefault: true,
       defaultModel: 'fake-chat',
       selectedModel: 'fake-chat',
@@ -300,6 +301,16 @@ async function run() {
       }
     }
   });
+
+  const presets = await invokeHandler('ui.tts.presets');
+  if (!presets || !Array.isArray(presets.presets) || presets.presets.length === 0) {
+    failures.push('未从已配置供应商生成 TTS 预设');
+  } else {
+    const preset = presets.presets[0];
+    if (preset.tts.provider !== 'openai') failures.push('预设协议推断错误: ' + preset.tts.provider);
+    if (!preset.tts.model) failures.push('预设未带入默认模型');
+    if (preset.providerName !== 'Fake') failures.push('预设未带入供应商名');
+  }
 
   const keySaved = await invokeHandler('ui.tts.saveKey', { apiKey: 'sk-test-key' });
   if (!keySaved || keySaved.hasKey !== true) failures.push('TTS 密钥未保存');

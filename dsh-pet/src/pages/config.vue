@@ -135,26 +135,28 @@
     </aicode-dialog>
 
     <aicode-dialog v-model="ttsOpen" title="语音合成（TTS）" confirm-text="保存" @confirm="saveTts">
-      <aicode-field label="供应商">
-        <aicode-select v-model="ttsDraft.provider" :options="ttsProviderOptions" @update:model-value="onTtsProviderChange" />
+      <aicode-field label="用哪个供应商">
+        <aicode-select v-model="ttsSource" :options="ttsSourceOptions" @update:model-value="onTtsSourceChange" />
       </aicode-field>
+      <p class="voice-hint">{{ ttsSourceHint }}</p>
       <aicode-field label="模型">
         <aicode-input v-model="ttsDraft.model" :placeholder="ttsModelPlaceholder" />
       </aicode-field>
       <aicode-field label="音色">
         <aicode-input v-model="ttsDraft.voice" :placeholder="ttsVoicePlaceholder" />
       </aicode-field>
-      <aicode-field label="API 地址（可留空）">
+      <aicode-field label="API 地址">
         <aicode-input v-model="ttsDraft.baseUrl" :placeholder="ttsBaseUrlPlaceholder" />
       </aicode-field>
       <aicode-field label="API Key">
         <aicode-input v-model="ttsKeyInput" type="password" :placeholder="ttsHasKey ? '已保存，留空则不修改' : '填入后保存'" />
       </aicode-field>
       <p class="voice-hint">
-        密钥由宿主加密存储，不写入插件配置。合成在插件进程内直接请求供应商，音频只在本地传给浮层播放。
+        宿主不会把 AiCode 里的供应商地址与密钥交给插件，所以这两项需在这里各填一次；密钥由宿主加密存储。
       </p>
       <div class="tts-actions">
         <aicode-button :disabled="busy" @click="previewTts">试听</aicode-button>
+        <aicode-button v-if="settings.voice.tts.provider !== 'none'" :disabled="busy" @click="disableTts">关闭朗读</aicode-button>
       </div>
       <p v-if="ttsHint" class="voice-hint">{{ ttsHint }}</p>
     </aicode-dialog>
@@ -263,11 +265,26 @@ const ttsDraft = ref({
   voice: '',
   speed: 1
 });
-const ttsProviderOptions = [
-  { value: 'none', label: '不启用' },
-  { value: 'openai', label: 'OpenAI 兼容（OpenAI / xAI / DeepSeek 等）' },
-  { value: 'gemini', label: 'Google Gemini' }
-];
+const ttsSource = ref('');
+const ttsPresets = ref<Array<{ providerId: string; providerName: string; tts: { provider: TtsProvider; baseUrl: string; model: string }; hasKey: boolean }>>([]);
+const ttsSourceOptions = computed(() => [
+  { value: '', label: '手动填写' },
+  ...ttsPresets.value.map((preset) => ({
+    value: preset.providerId,
+    label: preset.providerName + (preset.hasKey ? '' : '（未配置密钥）')
+  }))
+]);
+const ttsSourceHint = computed(() => {
+  if (!ttsSource.value) {
+    return ttsDraft.value.provider === 'none'
+      ? '尚未选择供应商；不启用时只用气泡文字。'
+      : '手动填写中：协议与地址来自下方字段。';
+  }
+  const preset = ttsPresets.value.find((item) => item.providerId === ttsSource.value);
+  if (!preset) return '';
+  const protocol = preset.tts.provider === 'gemini' ? 'Gemini' : 'OpenAI 兼容';
+  return `${preset.providerName}：已按 ${protocol} 协议带入模型。地址与密钥宿主不向插件开放，需在下方各填一次。`;
+});
 const ttsModelPlaceholder = computed(() =>
   ttsDraft.value.provider === 'gemini' ? 'gemini-2.5-flash-preview-tts' : 'gpt-4o-mini-tts'
 );
@@ -402,12 +419,30 @@ async function applyModelChoice(): Promise<void> {
 
 async function loadTtsState(): Promise<void> {
   try {
-    const result = await aicode.invoke<{ tts?: PetSettings['voice']['tts']; hasKey?: boolean }>('ui.tts.state');
+    const [result, presets] = await Promise.all([
+      aicode.invoke<{ tts?: PetSettings['voice']['tts']; hasKey?: boolean }>('ui.tts.state'),
+      aicode.invoke<{ presets?: typeof ttsPresets.value; error?: string | null }>('ui.tts.presets')
+    ]);
     if (result?.tts) settings.value = { ...settings.value, voice: { ...settings.value.voice, tts: result.tts } };
     ttsHasKey.value = result?.hasKey === true;
+    ttsPresets.value = presets?.presets ?? [];
+    if (presets?.error) ttsHint.value = '读取供应商失败：' + presets.error;
   } catch (error) {
     ttsHint.value = '读取 TTS 状态失败：' + (error as Error).message;
   }
+}
+
+/** 选已有供应商：带入协议与默认模型，让使用者不必自己查参数。 */
+function onTtsSourceChange(): void {
+  const preset = ttsPresets.value.find((item) => item.providerId === ttsSource.value);
+  if (!preset) return;
+  ttsDraft.value = {
+    provider: preset.tts.provider,
+    baseUrl: preset.tts.baseUrl,
+    model: preset.tts.model,
+    voice: ttsDraft.value.voice,
+    speed: ttsDraft.value.speed
+  };
 }
 
 async function toggleSpeakAloud(enabled: boolean): Promise<void> {
@@ -430,14 +465,23 @@ function openTtsSheet(): void {
   };
   ttsKeyInput.value = '';
   ttsHint.value = '';
+  ttsSource.value = '';
   void loadTtsState();
   ttsOpen.value = true;
 }
 
-function onTtsProviderChange(): void {
-  ttsDraft.value.model = '';
-  ttsDraft.value.voice = '';
-  ttsDraft.value.baseUrl = '';
+/** 关闭朗读：把供应商置为 none，保留其他字段以便下次打开。 */
+async function disableTts(): Promise<void> {
+  settings.value = {
+    ...settings.value,
+    voice: {
+      ...settings.value.voice,
+      speakAloud: false,
+      tts: { ...settings.value.voice.tts, provider: 'none' }
+    }
+  };
+  await save();
+  ttsOpen.value = false;
 }
 
 async function saveTts(): Promise<void> {

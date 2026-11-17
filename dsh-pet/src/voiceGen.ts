@@ -8,6 +8,8 @@ const MAX_LINE = 60;
 interface ProviderInfo {
   id: string;
   name: string;
+  /** openai / google / anthropic 等；用于推断 TTS 供应商与默认地址。 */
+  type: string;
   enabled: boolean;
   hasKey: boolean;
   isPlugin: boolean;
