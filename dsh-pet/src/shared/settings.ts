@@ -21,6 +21,12 @@ export type TtsProvider = 'none' | 'openai' | 'gemini';
 
 export interface TtsSettings {
   provider: TtsProvider;
+  /**
+   * 跟随哪套供应商：
+   * - follow：沿用「生成台词」的供应商
+   * - custom：自定义地址与密钥（可指向任意兼容服务）
+   */
+  source: 'follow' | 'custom';
   /** API 地址；留空使用供应商默认域名。 */
   baseUrl: string;
   model: string;
@@ -119,6 +125,7 @@ export const DEFAULT_SETTINGS: PetSettings = {
     speakAloud: false,
     tts: {
       provider: 'none',
+      source: 'follow',
       baseUrl: '',
       model: '',
       voice: '',
@@ -196,6 +203,7 @@ function normalizeTts(raw: unknown): TtsSettings {
   const input = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   return {
     provider: readTtsProvider(input.provider, DEFAULT_SETTINGS.voice.tts.provider),
+    source: input.source === 'custom' ? 'custom' : 'follow',
     baseUrl: typeof input.baseUrl === 'string' ? input.baseUrl.trim() : '',
     model: typeof input.model === 'string' ? input.model.trim() : '',
     voice: typeof input.voice === 'string' ? input.voice.trim() : '',

@@ -135,15 +135,20 @@
     </aicode-dialog>
 
     <aicode-dialog v-model="ttsOpen" title="语音合成（TTS）" confirm-text="保存" @confirm="saveTts">
-      <aicode-info-row label="供应商" :value="ttsProviderLabel" />
-      <p class="voice-hint">
-        朗读沿用「生成台词」的供应商，不再单独选一次。Gemini 走原生语音接口，其余按 OpenAI 兼容接口处理。
-      </p>
-      <aicode-field label="语音模型">
-        <aicode-select v-model="ttsModelPick" :options="ttsModelOptions" @update:model-value="onTtsModelPick" />
+      <aicode-field label="供应商来源">
+        <aicode-select v-model="ttsDraft.source" :options="ttsSourceOptions" @update:model-value="onTtsSourceKindChange" />
       </aicode-field>
-      <p v-if="ttsModelHint" class="voice-hint">{{ ttsModelHint }}</p>
-      <aicode-field label="模型名（可手动改）">
+      <template v-if="ttsDraft.source === 'follow'">
+        <aicode-info-row label="跟随" :value="ttsProviderLabel" />
+        <p class="voice-hint">
+          沿用「生成台词」的供应商。Gemini 走原生语音接口，其余按 OpenAI 兼容接口处理。
+        </p>
+        <aicode-field label="语音模型（该供应商已配置的）">
+          <aicode-select v-model="ttsModelPick" :options="ttsModelOptions" @update:model-value="onTtsModelPick" />
+        </aicode-field>
+        <p v-if="ttsModelHint" class="voice-hint">{{ ttsModelHint }}</p>
+      </template>
+      <aicode-field :label="ttsDraft.source === 'custom' ? '语音模型' : '模型名（可手动改）'">
         <aicode-input v-model="ttsDraft.model" :placeholder="ttsModelPlaceholder" />
       </aicode-field>
       <aicode-field label="音色">
@@ -155,9 +160,7 @@
       <aicode-field label="API Key">
         <aicode-input v-model="ttsKeyInput" type="password" :placeholder="ttsHasKey ? '已保存，留空则不修改' : '填入后保存'" />
       </aicode-field>
-      <p class="voice-hint">
-        宿主不会把 AiCode 里的供应商地址与密钥交给插件，所以这两项需在这里各填一次；密钥由宿主加密存储。
-      </p>
+      <p class="voice-hint">{{ ttsAddressHint }}</p>
       <div class="tts-actions">
         <aicode-button :disabled="busy" @click="previewTts">试听</aicode-button>
         <aicode-button v-if="settings.voice.tts.provider !== 'none'" :disabled="busy" @click="disableTts">关闭朗读</aicode-button>
@@ -264,11 +267,21 @@ const ttsHasKey = ref(false);
 const ttsKeyInput = ref('');
 const ttsDraft = ref({
   provider: 'none' as TtsProvider,
+  source: 'follow' as 'follow' | 'custom',
   baseUrl: '',
   model: '',
   voice: '',
   speed: 1
 });
+const ttsSourceOptions = [
+  { value: 'follow', label: '跟随生成台词的供应商' },
+  { value: 'custom', label: '自定义（任意兼容服务）' }
+];
+const ttsAddressHint = computed(() =>
+  ttsDraft.value.source === 'custom'
+    ? '自定义服务需填完整地址（例如 http://127.0.0.1:8788/v1）与密钥；留空则用该协议的官方地址。'
+    : '宿主不会把 AiCode 里的供应商地址与密钥交给插件，所以这两项需在这里各填一次；密钥由宿主加密存储。'
+);
 const ttsModelPick = ref('');
 const ttsPresets = ref<Array<{ providerId: string; providerName: string; tts: { provider: TtsProvider; baseUrl: string; model: string }; hasKey: boolean }>>([]);
 /** 朗读跟随「生成台词」的供应商；未指定时自动用默认供应商。 */
@@ -472,6 +485,7 @@ function openTtsSheet(): void {
   const tts = settings.value.voice.tts;
   ttsDraft.value = {
     provider: tts.provider,
+    source: tts.source,
     baseUrl: tts.baseUrl,
     model: tts.model,
     voice: tts.voice,
@@ -491,6 +505,22 @@ function openTtsSheet(): void {
   }
   void loadTtsState();
   ttsOpen.value = true;
+}
+
+/** 切换跟随/自定义；自定义时按地址形状猜协议，避免还要多选一次。 */
+function onTtsSourceKindChange(): void {
+  if (ttsDraft.value.source === 'custom') {
+    const looksGemini = /generativelanguage\.googleapis\.com/i.test(ttsDraft.value.baseUrl);
+    ttsDraft.value.provider = looksGemini ? 'gemini' : 'openai';
+    return;
+  }
+  const preset = ttsPresets.value.find((item) => item.providerId === ttsProviderId.value)
+    ?? ttsPresets.value.find((item) => item.hasKey);
+  if (preset) {
+    ttsDraft.value.provider = preset.tts.provider;
+    ttsDraft.value.model = preset.tts.model;
+    ttsDraft.value.baseUrl = '';
+  }
 }
 
 /** 关闭朗读：把供应商置为 none，保留其他字段以便下次打开。 */
@@ -523,6 +553,7 @@ async function saveTts(): Promise<void> {
         speakAloud: settings.value.voice.speakAloud,
         tts: {
           provider: draft.provider,
+          source: draft.source,
           baseUrl: draft.baseUrl.trim(),
           model: draft.model.trim(),
           voice: draft.voice.trim(),
