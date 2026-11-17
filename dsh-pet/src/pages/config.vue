@@ -135,11 +135,15 @@
     </aicode-dialog>
 
     <aicode-dialog v-model="ttsOpen" title="语音合成（TTS）" confirm-text="保存" @confirm="saveTts">
-      <aicode-field label="用哪个供应商">
-        <aicode-select v-model="ttsSource" :options="ttsSourceOptions" @update:model-value="onTtsSourceChange" />
+      <aicode-info-row label="供应商" :value="ttsProviderLabel" />
+      <p class="voice-hint">
+        朗读沿用「生成台词」的供应商，不再单独选一次。Gemini 走原生语音接口，其余按 OpenAI 兼容接口处理。
+      </p>
+      <aicode-field label="语音模型">
+        <aicode-select v-model="ttsModelPick" :options="ttsModelOptions" @update:model-value="onTtsModelPick" />
       </aicode-field>
-      <p class="voice-hint">{{ ttsSourceHint }}</p>
-      <aicode-field label="模型">
+      <p v-if="ttsModelHint" class="voice-hint">{{ ttsModelHint }}</p>
+      <aicode-field label="模型名（可手动改）">
         <aicode-input v-model="ttsDraft.model" :placeholder="ttsModelPlaceholder" />
       </aicode-field>
       <aicode-field label="音色">
@@ -265,25 +269,31 @@ const ttsDraft = ref({
   voice: '',
   speed: 1
 });
-const ttsSource = ref('');
+const ttsModelPick = ref('');
 const ttsPresets = ref<Array<{ providerId: string; providerName: string; tts: { provider: TtsProvider; baseUrl: string; model: string }; hasKey: boolean }>>([]);
-const ttsSourceOptions = computed(() => [
-  { value: '', label: '手动填写' },
-  ...ttsPresets.value.map((preset) => ({
-    value: preset.providerId,
-    label: preset.providerName + (preset.hasKey ? '' : '（未配置密钥）')
-  }))
+/** 朗读跟随「生成台词」的供应商；未指定时自动用默认供应商。 */
+const ttsProviderId = computed(() => {
+  if (settings.value.voice.providerId) return settings.value.voice.providerId;
+  return ttsPresets.value.find((item) => item.hasKey)?.providerId ?? '';
+});
+const ttsProviderLabel = computed(() => {
+  const id = ttsProviderId.value;
+  if (!id) return '未找到可用供应商';
+  const preset = ttsPresets.value.find((item) => item.providerId === id);
+  const name = preset ? preset.providerName : id;
+  return settings.value.voice.providerId ? name : name + '（默认供应商）';
+});
+/** 该供应商实际已配置的模型，用于避免填一个它并不支持的语音模型。 */
+const ttsProviderModels = computed(() => voiceOptions.value.find((p) => p.id === ttsProviderId.value)?.models ?? []);
+const ttsModelOptions = computed(() => [
+  { value: '', label: '手动输入' },
+  ...ttsProviderModels.value.map((model) => ({ value: model.id, label: model.displayName || model.id }))
 ]);
-const ttsSourceHint = computed(() => {
-  if (!ttsSource.value) {
-    return ttsDraft.value.provider === 'none'
-      ? '尚未选择供应商；不启用时只用气泡文字。'
-      : '手动填写中：协议与地址来自下方字段。';
+const ttsModelHint = computed(() => {
+  if (ttsProviderModels.value.length === 0) {
+    return '这个供应商没有可枚举的模型，请在下方直接填语音模型名。';
   }
-  const preset = ttsPresets.value.find((item) => item.providerId === ttsSource.value);
-  if (!preset) return '';
-  const protocol = preset.tts.provider === 'gemini' ? 'Gemini' : 'OpenAI 兼容';
-  return `${preset.providerName}：已按 ${protocol} 协议带入模型。地址与密钥宿主不向插件开放，需在下方各填一次。`;
+  return '这些是该供应商已配置的模型；其中不一定包含语音模型，请确认后填写。';
 });
 const ttsModelPlaceholder = computed(() =>
   ttsDraft.value.provider === 'gemini' ? 'gemini-2.5-flash-preview-tts' : 'gpt-4o-mini-tts'
@@ -412,8 +422,19 @@ function onProviderChange(): void {
 async function applyModelChoice(): Promise<void> {
   settings.value = {
     ...settings.value,
-    voice: { mode: 'auto', providerId: voiceDraft.value.providerId, model: voiceDraft.value.model }
+    voice: { ...settings.value.voice, providerId: voiceDraft.value.providerId, model: voiceDraft.value.model }
   };
+  // 换了供应商类型，协议也要跟着走；否则会把 Gemini 的请求打到 OpenAI 兼容地址。
+  const preset = ttsPresets.value.find((item) => item.providerId === voiceDraft.value.providerId);
+  if (preset && settings.value.voice.tts.provider !== 'none' && settings.value.voice.tts.provider !== preset.tts.provider) {
+    settings.value = {
+      ...settings.value,
+      voice: {
+        ...settings.value.voice,
+        tts: { ...settings.value.voice.tts, provider: preset.tts.provider, model: '' }
+      }
+    };
+  }
   await save();
 }
 
@@ -433,16 +454,9 @@ async function loadTtsState(): Promise<void> {
 }
 
 /** 选已有供应商：带入协议与默认模型，让使用者不必自己查参数。 */
-function onTtsSourceChange(): void {
-  const preset = ttsPresets.value.find((item) => item.providerId === ttsSource.value);
-  if (!preset) return;
-  ttsDraft.value = {
-    provider: preset.tts.provider,
-    baseUrl: preset.tts.baseUrl,
-    model: preset.tts.model,
-    voice: ttsDraft.value.voice,
-    speed: ttsDraft.value.speed
-  };
+/** 选一个该供应商已有的模型名。 */
+function onTtsModelPick(): void {
+  if (ttsModelPick.value) ttsDraft.value.model = ttsModelPick.value;
 }
 
 async function toggleSpeakAloud(enabled: boolean): Promise<void> {
@@ -465,7 +479,16 @@ function openTtsSheet(): void {
   };
   ttsKeyInput.value = '';
   ttsHint.value = '';
-  ttsSource.value = '';
+  ttsModelPick.value = '';
+  // 首次打开时按当前供应商类型推断协议，避免默认落到不匹配的接口。
+  if (tts.provider === 'none') {
+    const preset = ttsPresets.value.find((item) => item.providerId === ttsProviderId.value)
+      ?? ttsPresets.value.find((item) => item.hasKey);
+    if (preset) {
+      ttsDraft.value.provider = preset.tts.provider;
+      ttsDraft.value.model = preset.tts.model;
+    }
+  }
   void loadTtsState();
   ttsOpen.value = true;
 }
