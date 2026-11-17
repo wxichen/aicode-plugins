@@ -280,3 +280,33 @@ export async function listTtsPresets(): Promise<{ presets: TtsPreset[]; error: s
     return { presets: [], error: error instanceof Error ? error.message : String(error) };
   }
 }
+
+/**
+ * 探测某个地址是否真的提供语音接口。
+ *
+ * 有些 OpenAI 兼容服务只有 /v1/chat/completions（例如本地聚合网关），
+ * 拿对话模型去合成语音只会得到 404。这里只发一次极小的请求，看路由是否存在。
+ */
+export async function probeTtsEndpoint(baseUrl: string, protocol: 'openai' | 'gemini'): Promise<{ ok: boolean; reason?: string }> {
+  const base = trimSlash(baseUrl || (protocol === 'gemini' ? DEFAULT_GEMINI_BASE : DEFAULT_OPENAI_BASE));
+  const url = protocol === 'gemini' ? `${base}/models` : `${base}/audio/speech`;
+  try {
+    const result = await hostCall<{ status?: number; body?: string }>('host.http.request', {
+      url,
+      method: protocol === 'gemini' ? 'GET' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: protocol === 'gemini' ? undefined : JSON.stringify({ model: 'probe', voice: 'alloy', input: '.' }),
+      timeout: 15
+    });
+    const status = result?.status ?? 0;
+    // 401/403 说明路由存在、只是没鉴权；404 才是根本没有这个接口。
+    if (status === 404) {
+      const detail = typeof result?.body === 'string' ? result.body.slice(0, 200) : '';
+      return { ok: false, reason: `该地址没有语音接口（404）。${detail}` };
+    }
+    return { ok: true };
+  } catch (error) {
+    // 网络不可达等无法判定路由的情况交给试听去暴露，不在这里拦。
+    return { ok: true, reason: error instanceof Error ? error.message : String(error) };
+  }
+}

@@ -544,6 +544,15 @@ async function previewTts(): Promise<void> {
   busy.value = true;
   ttsHint.value = '正在合成…';
   try {
+    // 先确认地址上真的有语音接口，避免拿着对话模型合成而只看到 404。
+    const probe = await aicode.invoke<{ ok?: boolean; reason?: string }>('ui.tts.probe', {
+      baseUrl: ttsDraft.value.baseUrl,
+      provider: ttsDraft.value.provider
+    });
+    if (probe && probe.ok === false) {
+      ttsHint.value = probe.reason || '该地址没有语音合成接口';
+      return;
+    }
     const result = await aicode.invoke<{ ok?: boolean; reason?: string }>('ui.tts.preview');
     ttsHint.value = result?.ok ? '已发送到桌宠播放' : result?.reason || '试听失败';
   } catch (error) {

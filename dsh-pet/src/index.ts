@@ -10,7 +10,7 @@ import {
 } from './shared/settings';
 import { INTERACTIONS } from './shared/voice';
 import { listVoiceOptions, speak, voiceRequested } from './voiceGen';
-import { saveTtsKey, synthesize, ttsKeyPresent, listTtsPresets } from './speech';
+import { saveTtsKey, synthesize, ttsKeyPresent, listTtsPresets, probeTtsEndpoint } from './speech';
 
 const CONFIG_PATH = 'data://config.json';
 const STATE_PATH = 'data://state.json';
@@ -545,17 +545,29 @@ const handlers: Record<string, PluginHandler> = {
     return { hasKey };
   },
 
+  'ui.tts.probe': async (args: PluginArgs) => {
+    await load();
+    const baseUrl = readString(args, 'baseUrl') || settings.voice.tts.baseUrl;
+    const protocol = readString(args, 'provider', settings.voice.tts.provider) === 'gemini' ? 'gemini' : 'openai';
+    return probeTtsEndpoint(baseUrl, protocol);
+  },
+
   'ui.tts.preview': async (args: PluginArgs) => {
     await load();
     const text = readString(args, 'text') || '你好呀，我是' + settings.petName + '。';
-    const audio = await synthesize(settings, text);
-    if (!audio) return { ok: false, reason: 'TTS 未配置或缺少密钥' };
-    if (!overlayId) {
-      const opened = await openPet();
-      if (!opened.ok) return { ok: false, reason: opened.message || opened.code || '浮层不可用' };
+    try {
+      const audio = await synthesize(settings, text);
+      if (!audio) return { ok: false, reason: 'TTS 未配置或缺少密钥' };
+      if (!overlayId) {
+        const opened = await openPet();
+        if (!opened.ok) return { ok: false, reason: opened.message || opened.code || '浮层不可用' };
+      }
+      await postOverlay({ type: 'pet.speech', audio });
+      return { ok: true, durationHintMs: audio.durationHintMs };
+    } catch (error) {
+      // 把供应商的真实原因带回设置页：常见是该服务根本没有语音接口（404）。
+      return { ok: false, reason: errorMessage(error) };
     }
-    await postOverlay({ type: 'pet.speech', audio });
-    return { ok: true, durationHintMs: audio.durationHintMs };
   },
 
   'ui.pet.open': async () => openPet(),
