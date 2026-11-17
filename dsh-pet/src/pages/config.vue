@@ -138,8 +138,14 @@
       <aicode-field label="供应商">
         <aicode-select v-model="ttsDraft.providerId" :options="ttsProviderPickerOptions" @update:model-value="onTtsProviderPick" />
       </aicode-field>
+      <p v-if="!ttsDraft.providerId" class="voice-hint">
+        选「自定义」可填任意兼容服务的地址与密钥，不要求在 AiCode 里预先配置。
+      </p>
       <aicode-field label="模型">
         <aicode-select v-model="ttsModelPick" :options="ttsModelOptions" @update:model-value="onTtsModelPick" />
+      </aicode-field>
+      <aicode-field v-if="ttsModelPick === '__manual__'" label="模型名">
+        <aicode-input v-model="ttsDraft.model" :placeholder="ttsModelPlaceholder" />
       </aicode-field>
       <p class="voice-hint">{{ ttsModelHint }}</p>
       <aicode-field label="音色">
@@ -266,6 +272,7 @@ const ttsDraft = ref({
 });
 const ttsProviderPickerOptions = computed(() => [
   { value: '', label: '未选择' },
+  { value: '__custom__', label: '自定义（任意兼容服务）' },
   ...ttsPresets.value.map((preset) => ({
     value: preset.providerId,
     label: preset.providerName + (preset.hasKey ? '' : '（未配置密钥）')
@@ -274,19 +281,22 @@ const ttsProviderPickerOptions = computed(() => [
 const ttsAddressHint = computed(() =>
   ttsDraft.value.providerId
     ? '宿主不会把该供应商的地址与密钥交给插件，所以这两项需在这里各填一次；密钥由宿主加密存储。'
-    : '可先在「生成台词 - 供应商」里添加一个供应商，这里就能直接选它的模型。'
+    : '自定义服务需填完整地址（例如 http://127.0.0.1:8788/v1）与密钥；留空则用该协议的官方地址。'
 );
 const ttsModelPick = ref('');
 const ttsPresets = ref<Array<{ providerId: string; providerName: string; tts: { provider: TtsProvider; baseUrl: string; model: string }; hasKey: boolean }>>([]);
+/** 自定义模式下没有可枚举的模型，一律手填。 */
+const isCustomProvider = computed(() => ttsDraft.value.providerId === '__custom__');
 /** 该供应商在 AiCode 里已配置的模型；宿主返回的是它实际配置的名单，包含非对话模型。 */
-const ttsProviderModels = computed(
-  () => voiceOptions.value.find((p) => p.id === ttsDraft.value.providerId)?.models ?? []
+const ttsProviderModels = computed(() =>
+  isCustomProvider.value ? [] : voiceOptions.value.find((p) => p.id === ttsDraft.value.providerId)?.models ?? []
 );
 const ttsModelOptions = computed(() => [
   ...ttsProviderModels.value.map((model) => ({ value: model.id, label: model.displayName || model.id })),
-  { value: '', label: '以上都不是，手动填写' }
+  { value: '__manual__', label: '以上都不是，手动填写' }
 ]);
 const ttsModelHint = computed(() => {
+  if (isCustomProvider.value) return '自定义服务没有可列举的模型，请直接填写语音模型名。';
   if (!ttsDraft.value.providerId) return '先选一个供应商，就能列出它已配置的模型。';
   if (ttsProviderModels.value.length === 0) {
     return '这个供应商没有可枚举的模型，请把语音模型名填到下面的输入框。';
@@ -455,6 +465,8 @@ async function loadTtsState(): Promise<void> {
 /** 选已有供应商：带入协议与默认模型，让使用者不必自己查参数。 */
 /** 选一个该供应商已有的模型名。 */
 function onTtsModelPick(): void {
+  // 「手动填写」不是模型名，保留输入框，由用户自己键入。
+  if (ttsModelPick.value === '__manual__') return;
   if (ttsModelPick.value) ttsDraft.value.model = ttsModelPick.value;
 }
 
@@ -480,26 +492,38 @@ function openTtsSheet(): void {
   };
   ttsKeyInput.value = '';
   ttsHint.value = '';
-  ttsModelPick.value = tts.model;
-  // 未配置过时，默认落到「生成台词」用的供应商，省得再选一次。
-  if (!tts.providerId) {
-    ttsDraft.value.providerId =
-      settings.value.voice.providerId ||
-      ttsPresets.value.find((item) => item.hasKey)?.providerId ||
-      '';
+  // 已存过供应商才回填它；否则进自定义（地址与模型手动填）。
+  if (!tts.providerId) ttsDraft.value.providerId = '__custom__';
+  if (tts.provider === 'none') {
+    const preset = ttsPresets.value.find((item) => item.providerId === tts.providerId);
+    ttsDraft.value.provider = preset ? preset.tts.provider : 'openai';
   }
-  if (tts.provider === 'none' && ttsDraft.value.providerId) {
-    const preset = ttsPresets.value.find((item) => item.providerId === ttsDraft.value.providerId);
-    if (preset) ttsDraft.value.provider = preset.tts.provider;
-  }
-  void loadTtsState();
+  syncTtsModelPick();
   ttsOpen.value = true;
+  // 预设可能要现拉，拉完再对齐一次模型下拉。
+  void loadTtsState().then(syncTtsModelPick);
+}
+
+/** 根据当前供应商与已存模型，决定模型下拉应停在哪一项。 */
+function syncTtsModelPick(): void {
+  const models = voiceOptions.value.find((p) => p.id === ttsDraft.value.providerId)?.models ?? [];
+  ttsModelPick.value = models.some((m) => m.id === ttsDraft.value.model) ? ttsDraft.value.model : '__manual__';
 }
 
 /** 换供应商：同步协议，并把模型候选换成该供应商的。 */
 function onTtsProviderPick(): void {
+  if (ttsDraft.value.providerId === '__custom__') {
+    // 自定义：按地址形状猜协议，模型一律手填。
+    const looksGemini = /generativelanguage\.googleapis\.com/i.test(ttsDraft.value.baseUrl);
+    ttsDraft.value.provider = looksGemini ? 'gemini' : 'openai';
+    ttsModelPick.value = '__manual__';
+    return;
+  }
   const preset = ttsPresets.value.find((item) => item.providerId === ttsDraft.value.providerId);
-  if (!preset) return;
+  if (!preset) {
+    ttsModelPick.value = '__manual__';
+    return;
+  }
   ttsDraft.value.provider = preset.tts.provider;
   ttsDraft.value.baseUrl = '';
   // 保留当前模型名，若该供应商有同名模型则直接对上。
@@ -508,7 +532,7 @@ function onTtsProviderPick(): void {
     (model) => model.id === keep
   );
   if (!exists) ttsDraft.value.model = '';
-  ttsModelPick.value = exists ? keep : '';
+  ttsModelPick.value = exists ? keep : '__manual__';
 }
 
 /** 关闭朗读：把供应商置为 none，保留其他字段以便下次打开。 */
@@ -541,7 +565,7 @@ async function saveTts(): Promise<void> {
         speakAloud: settings.value.voice.speakAloud,
         tts: {
           provider: draft.provider,
-          providerId: draft.providerId,
+          providerId: draft.providerId === '__custom__' ? '' : draft.providerId,
           baseUrl: draft.baseUrl.trim(),
           model: draft.model.trim(),
           voice: draft.voice.trim(),

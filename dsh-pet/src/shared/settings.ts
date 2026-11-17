@@ -21,7 +21,7 @@ export type TtsProvider = 'none' | 'openai' | 'gemini';
 
 export interface TtsSettings {
   provider: TtsProvider;
-  /** 语音合成用哪个供应商；空字符串表示沿用「生成台词」的供应商。 */
+  /** 语音合成用哪个供应商；空字符串表示自定义服务。 */
   providerId: string;
   /** API 地址；留空使用供应商默认域名。 */
   baseUrl: string;
