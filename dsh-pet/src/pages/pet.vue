@@ -34,11 +34,10 @@
         <span class="mouth"></span>
       </div>
       <span v-if="state.sleeping" class="sleep-mark" aria-hidden="true">Z</span>
-      <span v-if="state.mood <= 30" class="mood-mark" aria-hidden="true">…</span>
     </div>
 
     <transition name="menu">
-      <div v-if="menuOpen" class="menu">
+      <div v-if="menuOpen" class="menu" :style="menuStyle">
         <button type="button" @click="doInteract('headpat')">摸头</button>
         <button type="button" @click="doInteract('feed')">喂食</button>
         <button type="button" @click="toggleSleep">{{ state.sleeping ? '起床' : '睡觉' }}</button>
@@ -66,7 +65,14 @@ import {
 const CREATE_WIDTH = 200;
 const CREATE_HEIGHT = 200;
 const BUBBLE_HEIGHT = 40;
-const ACTION_HEIGHT = 30;
+const MENU_BUTTON_HEIGHT = 30;
+const MENU_BUTTON_MIN_WIDTH = 44;
+const MENU_GAP = 4;
+const MENU_ITEMS = 6;
+const MENU_PADDING = 8;
+const MENU_TOP_GAP = 6;
+/** 菜单收起时只给窗口留这点高度，让宠物本体始终可拖拽。 */
+const MENU_RESERVED = 4;
 const SIDE_PADDING = 10;
 
 const state = ref<PetState>({
@@ -115,7 +121,19 @@ function resolveAsset(animation: PetAnimation): string {
 const petSize = computed(() => settings.value.pet.size);
 const petHeight = computed(() => Math.round((petSize.value * 9) / 16));
 const windowWidth = computed(() => Math.max(140, Math.min(720, petSize.value + SIDE_PADDING * 2)));
-const windowHeight = computed(() => Math.max(120, Math.min(1200, BUBBLE_HEIGHT + petHeight.value + ACTION_HEIGHT)));
+const stageBottom = computed(() => BUBBLE_HEIGHT + petHeight.value);
+// 每行能放下多少个按钮；单个按钮至少 MENU_BUTTON_MIN_WIDTH，否则文字会被截断。
+const menuColumns = computed(() => {
+  const usable = windowWidth.value - 2 * MENU_PADDING - (MENU_ITEMS - 1) * MENU_GAP;
+  return Math.max(1, Math.min(MENU_ITEMS, Math.floor(usable / MENU_BUTTON_MIN_WIDTH)));
+});
+const menuRows = computed(() => Math.ceil(MENU_ITEMS / menuColumns.value));
+const menuHeight = computed(
+  () => menuRows.value * MENU_BUTTON_HEIGHT + (menuRows.value - 1) * MENU_GAP + MENU_TOP_GAP
+);
+const windowHeight = computed(() =>
+  Math.max(120, Math.min(1200, stageBottom.value + (menuOpen.value ? menuHeight.value : MENU_RESERVED)))
+);
 const windowStyle = computed(() => ({
   width: windowWidth.value + 'px',
   height: windowHeight.value + 'px'
@@ -125,6 +143,12 @@ const stageStyle = computed(() => ({
   top: BUBBLE_HEIGHT + 'px',
   width: petSize.value + 'px',
   height: petHeight.value + 'px'
+}));
+const menuStyle = computed(() => ({
+  left: MENU_PADDING + 'px',
+  right: MENU_PADDING + 'px',
+  top: stageBottom.value + MENU_TOP_GAP + 'px',
+  gridTemplateColumns: `repeat(${menuColumns.value}, minmax(0, 1fr))`
 }));
 
 /** 心情低时待机动作换成东张西望，避免一直是同一段呼吸动画。 */
@@ -262,18 +286,16 @@ function showBubble(text: string): void {
 }
 
 /**
- * 宿主的拖拽手柄会盖在页面声明的拖拽区域上并吃掉触摸，只把手势通过消息回传。
- * 手柄尺寸不能为 0（宿主会报 PARAM_INVALID），菜单展开时缩成一条 1px 的细缝，
- * 把整个窗口的触摸都还给页面。
+ * 拖拽区域固定为宠物本体。菜单画在宠物下方，永远不与之重叠，
+ * 所以菜单按钮能收到触摸，菜单展开时也照样能拖动窗口。
  */
 async function updateDragRegion(): Promise<void> {
   const stage = stageEl.value;
   if (!stage) return;
   const rect = stage.getBoundingClientRect();
-  const region = menuOpen.value
-    ? { left: rect.left, top: rect.top, width: 1, height: 1 }
-    : { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-  await aicode.overlay.setDragRegion(region).catch(() => {});
+  await aicode.overlay
+    .setDragRegion({ left: rect.left, top: rect.top, width: rect.width, height: rect.height })
+    .catch(() => {});
 }
 
 async function applySize(): Promise<void> {
@@ -325,7 +347,7 @@ function onMessage(raw: OverlayMessage): void {
   } else if (message.type === 'pet.state' && message.state) {
     applyState(message.state as PetState);
   } else if (message.type === 'click') {
-    menuOpen.value = false;
+    void closeMenu();
     if (state.value.sleeping) {
       showBubble('唔……我在睡觉呢。');
     } else {
@@ -333,28 +355,32 @@ function onMessage(raw: OverlayMessage): void {
       void aicode.overlay.postMessage({ type: 'pet.click' }).catch(() => {});
     }
   } else if (message.type === 'longPress') {
-    openMenu();
+    void openMenu();
   } else if (message.type === 'dragStart') {
-    closeMenu();
+    void closeMenu();
     dragging.value = true;
   } else if (message.type === 'dragEnd') {
     dragging.value = false;
   } else if (message.type === 'snap') {
     document.body.dataset.edge = String(message.edge ?? '');
   } else if (message.type === 'appState' && message.foreground === true) {
-    closeMenu();
+    void closeMenu();
   }
 }
 
-function openMenu(): void {
+async function openMenu(): Promise<void> {
   menuOpen.value = true;
-  void updateDragRegion();
+  await nextTick();
+  await applySize();
+  await updateDragRegion();
 }
 
-function closeMenu(): void {
+async function closeMenu(): Promise<void> {
   if (!menuOpen.value) return;
   menuOpen.value = false;
-  void updateDragRegion();
+  await nextTick();
+  await applySize();
+  await updateDragRegion();
 }
 
 /**
@@ -366,22 +392,22 @@ function request(type: string, extra: Record<string, unknown> = {}): void {
 }
 
 async function doInteract(kind: 'headpat' | 'feed'): Promise<void> {
-  closeMenu();
+  void closeMenu();
   request('pet.interact', { kind });
 }
 async function toggleSleep(): Promise<void> {
-  closeMenu();
+  void closeMenu();
   request('pet.toggleSleep');
 }
 
 async function showSettingsTip(): Promise<void> {
-  closeMenu();
+  void closeMenu();
   bubbleText.value = '';
   showBubble('在「设置 → 插件 → AiCode 桌宠 → 插件配置」里修改设置。');
 }
 
 async function hidePet(): Promise<void> {
-  closeMenu();
+  void closeMenu();
   request('pet.hide');
 }
 
@@ -564,42 +590,31 @@ button {
   animation: sleep-float 2.6s ease-in-out infinite;
 }
 
-.mood-mark {
-  position: absolute;
-  left: 2px;
-  top: -4px;
-  color: var(--aicode-on-surface-variant);
-  font-size: calc(16px * var(--aicode-font-scale));
-  font-weight: 700;
-}
-
 /* 拖动时只做一点极淡的整体下沉，不在脚下画任何线条。 */
 .pet-window.is-dragging .pet-stage {
   transform: translateY(-2px);
 }
 
-/* 菜单固定在宠物下方的整行，落在拖拽区域之外，展开时也不会被手柄挡住。 */
+/* 菜单固定在宠物本体下方：永远不落在拖拽区域里，展开时也仍然可以拖动窗口。 */
 .menu {
   position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: 4px;
-  height: 30px;
-  display: flex;
+  display: grid;
   gap: 4px;
+  z-index: 4;
 }
 
 .menu button {
-  flex: 1;
   min-width: 0;
   height: 30px;
   padding: 0 2px;
   border: 0;
   border-radius: 9px;
-  background: rgba(20, 24, 34, 0.82);
+  background: rgba(20, 24, 34, 0.86);
   color: #fff;
-  font-size: 12px;
-  line-height: 30px;
+  font-size: 11px;
+  line-height: 1.15;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
 }
