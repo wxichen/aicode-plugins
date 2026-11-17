@@ -168,12 +168,20 @@ async function publishSettings(): Promise<void> {
   });
 }
 
+const SLEEP_ANIMATIONS: PetAnimation[] = ['sleepStart', 'sleepLoop', 'sleepEnd'];
+
 async function publishState(animation?: PetAnimation, text?: string): Promise<void> {
+  // 睡眠时只允许睡眠相关动画：否则点击/运行状态/碎碎念会把睡着的桌宠叫起来。
+  const sleeping = state.sleeping;
+  // 睡眠时只放行睡眠动画与它的台词；未指定动画的推送（如心情漂移）只更新数据，不动画面。
+  const blocked = sleeping && animation !== undefined && !SLEEP_ANIMATIONS.includes(animation);
+  const requested = blocked ? undefined : animation;
+  const allowedText = blocked ? undefined : text;
   const changed =
-    (animation !== undefined && animation !== state.lastAnimation) ||
-    (text !== undefined && text !== state.lastText);
-  if (animation) state.lastAnimation = animation;
-  if (text !== undefined) state.lastText = text;
+    (requested !== undefined && requested !== state.lastAnimation) ||
+    (allowedText !== undefined && allowedText !== state.lastText);
+  if (requested) state.lastAnimation = requested;
+  if (allowedText !== undefined) state.lastText = allowedText;
   if (changed) persistState();
   await postOverlay({ type: 'pet.state', state: statePayload() });
 }

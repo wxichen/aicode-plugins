@@ -1,5 +1,10 @@
 <template>
-  <div class="pet-window" :class="{ 'is-dragging': dragging, 'is-sleeping': state.sleeping }" :style="windowStyle">
+  <div
+    class="pet-window"
+    :class="{ 'is-dragging': dragging, 'is-sleeping': state.sleeping }"
+    :style="windowStyle"
+    @pointerdown="onWindowPointerDown"
+  >
     <transition name="bubble">
       <div v-if="bubbleText" class="bubble" :class="{ sleeping: state.sleeping }">
         <span class="bubble-text">{{ bubbleText }}</span>
@@ -36,16 +41,13 @@
       <span v-if="state.sleeping" class="sleep-mark" aria-hidden="true">Z</span>
     </div>
 
-    <transition name="menu">
-      <div v-if="menuOpen" class="menu" :style="menuStyle">
-        <button type="button" @click="doInteract('headpat')">摸头</button>
-        <button type="button" @click="doInteract('feed')">喂食</button>
-        <button type="button" @click="toggleSleep">{{ state.sleeping ? '起床' : '睡觉' }}</button>
-        <button type="button" @click="showSettingsTip">设置</button>
-        <button type="button" class="hide" @click="hidePet">隐藏</button>
-        <button type="button" class="close" aria-label="收起菜单" @click="closeMenu">×</button>
-      </div>
-    </transition>
+    <div v-if="menuOpen" class="menu" :style="menuStyle">
+      <button type="button" @click="doInteract('headpat')">摸头</button>
+      <button type="button" @click="doInteract('feed')">喂食</button>
+      <button type="button" @click="toggleSleep">{{ state.sleeping ? '起床' : '睡觉' }}</button>
+      <button type="button" @click="showSettingsTip">设置</button>
+      <button type="button" class="hide" @click="hidePet">隐藏</button>
+    </div>
   </div>
 </template>
 
@@ -68,12 +70,13 @@ const BUBBLE_HEIGHT = 40;
 const MENU_BUTTON_HEIGHT = 30;
 const MENU_BUTTON_MIN_WIDTH = 44;
 const MENU_GAP = 4;
-const MENU_ITEMS = 6;
+const MENU_ITEMS = 5;
 const MENU_PADDING = 8;
 const MENU_TOP_GAP = 6;
 /** 菜单收起时只给窗口留这点高度，让宠物本体始终可拖拽。 */
 const MENU_RESERVED = 4;
 const SIDE_PADDING = 10;
+const SLEEP_ANIMATIONS: PetAnimation[] = ['sleepStart', 'sleepLoop', 'sleepEnd'];
 
 const state = ref<PetState>({
   sleeping: false,
@@ -99,6 +102,7 @@ let bubbleTimer: ReturnType<typeof setTimeout> | null = null;
 let offMessage: (() => void) | null = null;
 let lastWidth = 0;
 let lastHeight = 0;
+let pendingResize = false;
 
 const assetUrls = new Map<PetAnimation, string>();
 const layerAnimations: Array<PetAnimation | null> = [null, null];
@@ -131,8 +135,9 @@ const menuRows = computed(() => Math.ceil(MENU_ITEMS / menuColumns.value));
 const menuHeight = computed(
   () => menuRows.value * MENU_BUTTON_HEIGHT + (menuRows.value - 1) * MENU_GAP + MENU_TOP_GAP
 );
+// 收起菜单时保持高度不变，直到松手后才真正缩小：收起瞬间改布局会打断拖动。
 const windowHeight = computed(() =>
-  Math.max(120, Math.min(1200, stageBottom.value + (menuOpen.value ? menuHeight.value : MENU_RESERVED)))
+  Math.max(120, Math.min(1200, stageBottom.value + (menuOpen.value || dragging.value ? menuHeight.value : MENU_RESERVED)))
 );
 const windowStyle = computed(() => ({
   width: windowWidth.value + 'px',
@@ -234,6 +239,10 @@ function onVideoEnded(index: number): void {
     void playAnimation(idleAnimation());
     return;
   }
+  if (state.value.sleeping) {
+    void playAnimation('sleepLoop');
+    return;
+  }
   if (['click', 'action', 'success', 'error', 'turn'].includes(animation)) {
     void playAnimation(idleAnimation());
   }
@@ -306,15 +315,29 @@ async function applySize(): Promise<void> {
   await updateDragRegion();
 }
 
+/**
+ * 把窗口尺寸同步到当前状态。拖动中不能 resize（会打断原生触摸序列），
+ * 先记下待办，松手后由 dragEnd 补上。
+ */
+async function syncWindowSize(): Promise<void> {
+  if (dragging.value) {
+    pendingResize = true;
+    return;
+  }
+  pendingResize = false;
+  await applySize();
+}
+
 async function applySettings(next: PetSettings): Promise<void> {
   settings.value = normalizeSettings(next);
-  await nextTick();  // 桌宠浮层始终悬浮在其它应用之上，设置关掉「置顶」时退回仅 App 前台可见。
+  await nextTick();
+  // 桌宠浮层始终悬浮在其它应用之上，设置关掉「置顶」时退回仅 App 前台可见。
   await aicode.overlay
     .setVisibilityPolicy(settings.value.pet.alwaysOnTop ? 'always' : 'foreground')
     .catch(() => {});
   await applySize();
   if (currentAnimation === null || !ANIMATION_ASSETS[currentAnimation]) {
-    await playAnimation(idleAnimation(), true);
+    await playAnimation(state.value.sleeping ? 'sleepLoop' : idleAnimation(), true);
   }
 }
 
@@ -332,9 +355,17 @@ function applyState(next: PetState): void {
     lastText: typeof next.lastText === 'string' ? next.lastText : '',
     updatedAt: typeof next.updatedAt === 'number' ? next.updatedAt : Date.now()
   };
-  if (textChanged && state.value.lastText) showBubble(state.value.lastText);
+  if (textChanged && state.value.lastText) {
+    // 睡着时只有睡眠台词能弹气泡，运行状态/碎碎念一律静默。
+    const sleepLine = !state.value.sleeping || SLEEP_ANIMATIONS.includes(state.value.lastAnimation ?? 'idle');
+    if (sleepLine) showBubble(state.value.lastText);
+  }
   if (animationChanged && state.value.lastAnimation) {
-    void playAnimation(state.value.lastAnimation, true);
+    // 睡着时只播睡眠动画，避免任何状态推送把它叫起来。
+    const sleeping = state.value.sleeping;
+    if (!sleeping || SLEEP_ANIMATIONS.includes(state.value.lastAnimation)) {
+      void playAnimation(state.value.lastAnimation, true);
+    }
   } else if (moodDropped && !state.value.runActive && !state.value.sleeping) {
     void playAnimation(settings.value.animations.turn);
   }
@@ -357,10 +388,12 @@ function onMessage(raw: OverlayMessage): void {
   } else if (message.type === 'longPress') {
     void openMenu();
   } else if (message.type === 'dragStart') {
-    void closeMenu();
+    // 拖动时不能改窗口尺寸，否则原生触摸序列会被打断（断触），菜单也不能在这里收起。
     dragging.value = true;
   } else if (message.type === 'dragEnd') {
     dragging.value = false;
+    // 拖动期间被推迟的尺寸变化在这里补上。
+    if (pendingResize) void syncWindowSize();
   } else if (message.type === 'snap') {
     document.body.dataset.edge = String(message.edge ?? '');
   } else if (message.type === 'appState' && message.foreground === true) {
@@ -371,16 +404,24 @@ function onMessage(raw: OverlayMessage): void {
 async function openMenu(): Promise<void> {
   menuOpen.value = true;
   await nextTick();
-  await applySize();
-  await updateDragRegion();
+  await syncWindowSize();
 }
 
 async function closeMenu(): Promise<void> {
   if (!menuOpen.value) return;
   menuOpen.value = false;
   await nextTick();
-  await applySize();
-  await updateDragRegion();
+  await syncWindowSize();
+}
+
+/**
+ * 点菜单以外的区域收起菜单。拖拽手柄上的点由宿主按 click 回传、不经过这里，
+ * 所以拖动结束时不会被误判成「点空白」。
+ */
+function onWindowPointerDown(event: PointerEvent): void {
+  if (!menuOpen.value) return;
+  if ((event.target as HTMLElement | null)?.closest('.menu')) return;
+  void closeMenu();
 }
 
 /**
@@ -623,13 +664,6 @@ button {
   background: rgba(170, 44, 56, 0.86);
 }
 
-.menu button.close {
-  flex: none;
-  width: 26px;
-  background: rgba(20, 24, 34, 0.56);
-  font-size: 15px;
-}
-
 .bubble-enter-active,
 .bubble-leave-active {
   transition: opacity 140ms ease, transform 140ms ease;
@@ -639,17 +673,6 @@ button {
 .bubble-leave-to {
   opacity: 0;
   transform: translateY(-4px) scale(0.98);
-}
-
-.menu-enter-active,
-.menu-leave-active {
-  transition: opacity 120ms ease, transform 120ms ease;
-}
-
-.menu-enter-from,
-.menu-leave-to {
-  opacity: 0;
-  transform: translateY(3px);
 }
 
 @keyframes pet-breathe {
@@ -687,9 +710,7 @@ button {
 
 @media (prefers-reduced-motion: reduce) {
   .bubble-enter-active,
-  .bubble-leave-active,
-  .menu-enter-active,
-  .menu-leave-active {
+  .bubble-leave-active {
     transition: none;
   }
   .sleep-mark,
