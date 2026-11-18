@@ -715,6 +715,14 @@ const handlers: Record<string, PluginHandler> = {
       await postOverlay({ type: 'pet.singStop' });
       return { ok: true };
     }
+    if (type === 'pet.singError') {
+      log(
+        '浮层播放失败：stage=' + String(payload.stage) +
+          ' message=' + String(payload.message) +
+          ' detail=' + String(payload.detail)
+      );
+      return { ok: true };
+    }
     if (type === 'pet.singState') {
       // 浮层回传的真实播放状态，写日志供排查。
       log(

@@ -314,6 +314,13 @@ function startLyricTimer(): void {
   }, 250);
 }
 
+/** 把播放失败的真实原因回传进程，写入应用日志。 */
+function reportSingError(stage: string, message: string, detail: string): void {
+  void aicode.overlay
+    .postMessage({ type: 'pet.singError', stage, message, detail: String(detail).slice(0, 300) })
+    .catch(() => {});
+}
+
 function setLyrics(next: LyricLine[] | undefined): void {
   lyrics.value = Array.isArray(next) ? next : [];
   lyricIndex = -1;
@@ -370,7 +377,18 @@ interface SingPayload {
 async function buildAudioUrlFromChunks(chunks: string[], mimeType: string): Promise<string> {
   const parts: BlobPart[] = [];
   for (const path of chunks) {
-    const file = await aicode.fs.readBinary(path);
+    let file;
+    try {
+      file = await aicode.fs.readBinary(path);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      reportSingError('readBinary', message, path);
+      throw new Error('音频切片读取失败（' + path + '）：' + message);
+    }
+    if (!file || typeof file.base64 !== 'string' || !file.base64) {
+      reportSingError('readBinaryEmpty', 'empty base64', path);
+      throw new Error('音频切片为空：' + path);
+    }
     const binary = atob(file.base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
@@ -382,16 +400,21 @@ async function buildAudioUrlFromChunks(chunks: string[], mimeType: string): Prom
 function playSong(song: SingPayload | null): void {
   if (!song) return;
   setLyrics(song.lyrics);
-  // 进程把音频切片放在 data://，这里读回拼成 Blob 播放（http 直链会被混合内容拦截）。
+  // 音频一律以切片形式下发（进程下载），这里读回拼成 Blob 播放。
   if (song.chunks && song.chunks.length > 0) {
     void playChunkedSong(song as SingPayload & { chunks: string[] });
     return;
   }
-  // 既没有 chunks 也没有直链时，只用墙钟时间滚歌词。
-  if (!song.url) {
-    startExternalLyrics();
+  if (song.url) {
+    void playDirectUrl(song.url, song.mimeType);
     return;
   }
+  // 既没有切片也没有直链：只能按墙钟时间滚歌词。
+  startExternalLyrics();
+}
+
+/** 直链播放（仅 https 可用；http 会被 WebView 的混合内容策略拦住）。 */
+async function playDirectUrl(url: string, mimeType?: string): Promise<void> {
   if (!songEl) {
     songEl = new Audio();
     songEl.preload = 'auto';
@@ -406,13 +429,19 @@ function playSong(song: SingPayload | null): void {
     });
   }
   speechEl?.pause();
-  songEl.src = song.url;
+  songEl.src = url;
   singing.value = true;
-  void songEl.play().catch(() => {
+  try {
+    await songEl.play();
+  } catch (error) {
     singing.value = false;
     stopLyricTimer();
-    showBubble('这首唱不了，换一首吧。');
-  });
+    const message = error instanceof Error ? error.message : String(error);
+    // 不再静默：把真实原因写进气泡与日志。
+    showBubble('这首唱不了：' + message);
+    reportSingError('directUrl', message, url);
+    return;
+  }
   startLyricTimer();
 }
 
@@ -420,8 +449,7 @@ let objectUrl: string | null = null;
 
 async function playChunkedSong(song: SingPayload & { chunks: string[] }): Promise<void> {
   try {
-    const url = await buildAudioUrlFromChunks(song.chunks, song.mimeType || 'audio/mpeg');
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    const url = await buildAudioUrlFromChunks(song.chunks, song.mimeType || 'audio/mpeg');    if (objectUrl) URL.revokeObjectURL(objectUrl);
     objectUrl = url;
     if (!songEl) {
       songEl = new Audio();
@@ -445,7 +473,9 @@ async function playChunkedSong(song: SingPayload & { chunks: string[] }): Promis
       // 未解锁音频时 WebView 会拒绝异步播放：明确提示，而不是静默“正在播放”。
       singing.value = false;
       stopLyricTimer();
-      showBubble('需要先点一下桌宠再说唱歌：' + (error as Error).message);
+      const message = error instanceof Error ? error.message : String(error);
+      showBubble('需要先点一下桌宠再说唱歌：' + message);
+      reportSingError('chunked', message, `chunks=${song.chunks.length} ready=${songEl.readyState}`);
       return;
     }
     // 把真实播放状态回传进程，便于排查“显示在播但没声”。

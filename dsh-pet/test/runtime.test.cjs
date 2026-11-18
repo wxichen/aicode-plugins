@@ -49,6 +49,7 @@ hostHandlers.set('host.fs.writeBinary', async (params) => {
   return { ok: true };
 });
 hostHandlers.set('host.fs.mkdir', async () => ({ ok: true }));
+hostHandlers.set('host.fs.readBinary', async (params) => ({ base64: files.get(String(params.path)) || '' }));
 hostHandlers.set('host.overlay.create', async () => ({ overlayId: 'overlay-1', width: 260, height: 190 }));
 hostHandlers.set('host.overlay.postMessage', async (params) => {
   calls.push({ overlay: params.payload });

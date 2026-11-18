@@ -465,7 +465,7 @@ export async function fetchLyrics(
  * host.ui.openUrl 又会被浏览器接手。于是由进程下载，页面分片读回再拼成 Blob 播放。
  * 每片取 400 KiB（base64 约 533 KiB，低于页面单次读取 512 KiB 的限制需要更小）。
  */
-export const AUDIO_CHUNK_BYTES = 320 * 1024;
+export const AUDIO_CHUNK_BYTES = 256 * 1024;
 
 export interface DownloadedAudio {
   /** 片文件路径，按 index 顺序拼接即完整音频。 */
@@ -547,6 +547,11 @@ export async function downloadAudioChunks(
     const path = `${dir}/${index}.bin`;
     await hostCall('host.fs.writeBinary', { path, base64: slice.toString('base64') });
     chunks.push(path);
+  }
+  // 写完校验第一片能读回，避免“看似成功、实际空文件”。
+  const check = await hostCall<{ base64?: string }>('host.fs.readBinary', { path: chunks[0] });
+  if (!check?.base64) {
+    throw new MusicApiError('音频切片写入后无法读回，可能是数据目录不可写', 'AUDIO_WRITE_FAILED');
   }
   return { chunks, mimeType, totalBytes: bytes.length, songKey };
 }
