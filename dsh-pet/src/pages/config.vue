@@ -1375,7 +1375,10 @@ async function singFromPet(): Promise<void> {
       'ui.pet.sing',
       { listId: currentListId.value }
     );
-    musicHint.value = result?.ok === true ? '桌宠正在唱：' + (result.song?.title ?? '') : result?.message || '唱歌失败';
+    musicHint.value =
+      result?.ok === true
+        ? '桌宠正在唱：' + (result.song?.title ?? '（若无声，先点一下桌宠再试）')
+        : result?.message || '唱歌失败';
   } catch (error) {
     musicHint.value = '唱歌失败：' + (error as Error).message;
   } finally {
@@ -1402,7 +1405,7 @@ async function playSongItem(song: MusicSong): Promise<void> {
     }
     const chunks = result.chunks ?? [];
     musicHint.value =
-      chunks.length > 0 ? '正在播放：' + song.title : '音频下载失败，请重试';
+      chunks.length > 0 ? '正在播放：' + song.title + '（若无声，先点一下桌宠）' : '音频下载失败，请重试';
   } catch (error) {
     musicHint.value = '播放失败：' + (error as Error).message;
   } finally {

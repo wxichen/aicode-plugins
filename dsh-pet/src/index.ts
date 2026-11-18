@@ -715,6 +715,16 @@ const handlers: Record<string, PluginHandler> = {
       await postOverlay({ type: 'pet.singStop' });
       return { ok: true };
     }
+    if (type === 'pet.singState') {
+      // 浮层回传的真实播放状态，写日志供排查。
+      log(
+        `浮层播放状态：paused=${String(payload.paused)} muted=${String(payload.muted)} ` +
+          `volume=${String(payload.volume)} t=${String(payload.currentTime)} ` +
+          `duration=${String(payload.duration)} ready=${String(payload.readyState)} ` +
+          `err=${String(payload.errorCode)}`
+      );
+      return { ok: true };
+    }
     if (type === 'pet.refresh') {
       await publishSettings();
       await publishState(state.lastAnimation ?? settings.animations.idle, state.lastText);
@@ -1084,10 +1094,24 @@ const handlers: Record<string, PluginHandler> = {
       albumAudioId: song.albumAudioId
     });
     if (!played.ok) return played;
-    // 一律由进程下载切片，页面读回拼 Blob 播放：
-    // 这样既不跳浏览器，也不受 WebView 混合内容限制。
+    // 一律由进程下载切片，再推给浮层读回拼 Blob 播放：
+    // 既不跳浏览器，也不受 WebView 混合内容限制。
     try {
       const audio = await downloadAudioChunks(song.hash, played.url);
+      if (!overlayId) {
+        const opened = await openPet();
+        if (!opened.ok) {
+          return { ok: false, code: opened.code || 'OVERLAY_FAILED', message: opened.message || '桌宠浮层不可用' };
+        }
+      }
+      // 关键：把切片推给浮层，由浮层真正播放（不能只返回路径）。
+      await postOverlay({
+        type: 'pet.sing',
+        song: { title: song.title ?? '', singer: song.singer ?? '', cover: song.cover ?? '', url: '' },
+        lyrics: [],
+        chunks: audio.chunks,
+        mimeType: audio.mimeType
+      });
       return {
         ok: true,
         url: played.url,

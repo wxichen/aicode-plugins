@@ -439,7 +439,28 @@ async function playChunkedSong(song: SingPayload & { chunks: string[] }): Promis
     speechEl?.pause();
     songEl.src = url;
     singing.value = true;
-    await songEl.play();
+    try {
+      await songEl.play();
+    } catch (error) {
+      // 未解锁音频时 WebView 会拒绝异步播放：明确提示，而不是静默“正在播放”。
+      singing.value = false;
+      stopLyricTimer();
+      showBubble('需要先点一下桌宠再说唱歌：' + (error as Error).message);
+      return;
+    }
+    // 把真实播放状态回传进程，便于排查“显示在播但没声”。
+    void aicode.overlay
+      .postMessage({
+        type: 'pet.singState',
+        paused: songEl.paused,
+        muted: songEl.muted,
+        volume: songEl.volume,
+        currentTime: songEl.currentTime,
+        duration: Number.isFinite(songEl.duration) ? songEl.duration : -1,
+        readyState: songEl.readyState,
+        errorCode: songEl.error ? songEl.error.code : 0
+      })
+      .catch(() => {});
     startLyricTimer();
   } catch (error) {
     singing.value = false;
@@ -470,7 +491,44 @@ async function doSing(): Promise<void> {
     stopSong();
     return;
   }
+  // WebView 默认 mediaPlaybackRequiresUserGesture=true，异步播放会被拒。
+  // 在本次手势里先用一段静音解锁音频，下载完成后再真正播放。
+  unlockAudio();
   request('pet.sing');
+}
+
+let audioUnlocked = false;
+
+/** 在用户手势内播一段极短静音，解除后续异步播放的限制。 */
+let unlockEl: HTMLAudioElement | null = null;
+
+/**
+ * 在用户手势内解锁音频。
+ * WebView 默认 mediaPlaybackRequiresUserGesture=true，解锁前所有异步 play() 都会被拒。
+ * 用独立的元素做，避免影响真正的播放器。
+ */
+function unlockAudio(): void {
+  if (audioUnlocked) return;
+  try {
+    if (!unlockEl) {
+      unlockEl = new Audio();
+      // 44 字节的空 WAV，播放瞬间即结束。
+      unlockEl.src =
+        'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YQAAAAA=';
+      unlockEl.volume = 0;
+    }
+    void unlockEl
+      .play()
+      .then(() => {
+        audioUnlocked = true;
+        unlockEl?.pause();
+      })
+      .catch(() => {
+        // 解锁失败：某些环境本来就不需要手势。
+      });
+  } catch {
+    // 忽略：解锁只是优化。
+  }
 }
 
 /** 点击音效用 WebAudio 现场合成，包内没有音频素材，也避免额外解码开销。 */
@@ -647,6 +705,8 @@ async function closeMenu(): Promise<void> {
  * 所以拖动结束时不会被误判成「点空白」。
  */
 function onWindowPointerDown(event: PointerEvent): void {
+  // 任何一次触摸都尝试解锁音频，这样从设置页发起的播放也能出声。
+  unlockAudio();
   if (!menuOpen.value) return;
   if ((event.target as HTMLElement | null)?.closest('.menu')) return;
   void closeMenu();
@@ -682,6 +742,8 @@ async function hidePet(): Promise<void> {
 
 onMounted(async () => {
   offMessage = aicode.overlay.onMessage(onMessage);
+  // 浮层整个窗口的触摸都作为解锁音频的手势来源。
+  window.addEventListener('pointerdown', () => unlockAudio(), { passive: true });
   await applySize();
   await prepareLayer(0, settings.value.animations.idle);
   await prepareLayer(1, settings.value.animations.drag);

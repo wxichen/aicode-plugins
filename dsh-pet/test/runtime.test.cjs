@@ -585,6 +585,11 @@ async function run() {
   if (!playOk || playOk.ok !== true || !playOk.url) failures.push('登录后取播放地址失败: ' + JSON.stringify(playOk));
 
   if (playOk && (!playOk.chunks || playOk.chunks.length === 0)) failures.push('播放未返回音频切片');
+  const singPush = calls.filter((c) => c.overlay && c.overlay.type === 'pet.sing').pop();
+  if (!singPush) failures.push('播放未把切片推给浮层');
+  else if (!Array.isArray(singPush.overlay.chunks) || singPush.overlay.chunks.length === 0) {
+    failures.push('推送的 pet.sing 缺少 chunks');
+  }
   if (calls.some((c) => c.openUrl)) failures.push('不应再调用 openUrl（会跳浏览器）');
 
   const playReq = musicRequests.filter((r) => r.path === '/song/url').pop();
