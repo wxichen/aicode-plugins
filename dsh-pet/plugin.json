@@ -6,7 +6,7 @@
     "default": "DSH Pet",
     "zh-CN": "AiCode 桌宠"
   },
-  "version": "0.3.5",
+  "version": "0.4.0",
   "publisher": "wxichen",
   "repository": "https://github.com/wxichen/aicode-plugins",
   "description": {
@@ -51,6 +51,16 @@
         "slot": "settings.ai",
         "page": "pages/config.html",
         "icon": "zap"
+      },
+      {
+        "id": "music",
+        "title": {
+          "default": "KA Music",
+          "zh-CN": "音乐搜索"
+        },
+        "slot": "drawer.footer",
+        "page": "pages/config.html",
+        "icon": "cloud"
       }
     ],
     "hooks": [
@@ -142,6 +152,32 @@
         },
         "inputSchema": "schemas/interact.input.json",
         "handler": "tools.interact"
+      },
+      {
+        "id": "searchMusic",
+        "title": {
+          "default": "Search Music",
+          "zh-CN": "搜索歌曲"
+        },
+        "description": {
+          "default": "Search Kugou songs by keyword and return title, singer, album, hash and duration.",
+          "zh-CN": "按关键词搜索酷狗歌曲，返回歌名、歌手、专辑、文件哈希与时长。"
+        },
+        "inputSchema": "schemas/music-search.input.json",
+        "handler": "tools.searchMusic"
+      },
+      {
+        "id": "musicAccount",
+        "title": {
+          "default": "Music Account",
+          "zh-CN": "音乐账号状态"
+        },
+        "description": {
+          "default": "Report whether a Kugou account is signed in.",
+          "zh-CN": "查询当前是否已登录音乐账号，返回昵称与用户 ID。"
+        },
+        "inputSchema": "schemas/music-account.input.json",
+        "handler": "tools.musicAccount"
       }
     ]
   }

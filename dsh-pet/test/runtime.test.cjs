@@ -43,6 +43,85 @@ hostHandlers.set('host.overlay.postMessage', async (params) => {
   return { ok: true };
 });
 hostHandlers.set('host.overlay.close', async () => ({ ok: true }));
+const musicRequests = [];
+const musicState = { qrPolls: 0 };
+hostHandlers.set('host.http.request', async (params) => {
+  const url = new URL(params.url);
+  const rawBody = params.body == null ? '' : String(params.body);
+  let body = null;
+  try {
+    body = rawBody ? JSON.parse(rawBody) : null;
+  } catch {
+    body = null;
+  }
+  musicRequests.push({ path: url.pathname, method: params.method, query: url.search, body, headers: params.headers });
+
+  const json = (status, payload, headers = {}) => ({
+    status,
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(payload),
+    truncated: false
+  });
+
+  if (url.pathname === '/search') {
+    const keywords = url.searchParams.get('keywords') || '';
+    if (keywords === 'empty') return json(200, []);
+    return json(200, [
+      {
+        FileHash: 'HASH-1',
+        FileName: '周杰伦 - 晴天',
+        OriSongName: '晴天',
+        SingerName: '周杰伦',
+        AlbumName: '叶惠美',
+        Duration: 269,
+        Bitrate: 128,
+        Image: 'http://example.com/c.jpg',
+        ExtName: 'mp3',
+        AlbumID: '1'
+      },
+      { FileName: '缺少 hash 的条目' }
+    ]);
+  }
+  if (url.pathname === '/captcha/sent') {
+    // 真实接口的成功响应形状
+    return json(200, { code: 0, status: 1, error_code: 0, count: 9 });
+  }
+  if (url.pathname === '/login/cellphone') {
+    // 真实接口要求 JSON body；这里模拟缺失 body 时的 400
+    if (!body || !body.mobile) {
+      return json(400, {
+        title: 'One or more validation errors occurred.',
+        status: 400,
+        errors: { '': ['A non-empty request body is required.'] }
+      });
+    }
+    if (body.mobile === '13800000000') {
+      return json(
+        200,
+        { token: 'TOKEN-PHONE', userid: '7', nickname: '手机用户', pic: 'http://example.com/b.png' },
+        { 'X-Kg-Session-Id': 'SID-PHONE' }
+      );
+    }
+    return json(400, { message: '验证码错误' });
+  }
+  if (url.pathname === '/login/qr/key') {
+    return json(200, { qrcode: 'QR-KEY-1', qrcode_img: 'data:image/png;base64,AAAA' });
+  }
+  if (url.pathname === '/login/qr/check') {
+    musicState.qrPolls += 1;
+    if (musicState.qrPolls === 1) return json(200, { status: 2 });
+    return json(
+      200,
+      { status: 4, token: 'TOKEN-QR', userid: '42', nickname: '测试用户', pic: 'http://example.com/a.png' },
+      { 'X-Kg-Session-Id': 'SID-QR' }
+    );
+  }
+  if (url.pathname === '/login/token') {
+    return json(200, { token: 'TOKEN-REFRESH', userid: '7' }, { 'X-Kg-Session-Id': 'SID-REFRESH' });
+  }
+  return json(404, { message: 'not found' });
+});
+
 hostHandlers.set('host.notify', async (params) => {
   calls.push({ notify: params });
   return { ok: true };
@@ -335,6 +414,71 @@ async function run() {
   const hidden = await invokeHandler('ui.pet.hide');
   if (!hidden || !hidden.settings || hidden.settings.pet.enabled !== false) failures.push('隐藏桌宠失败');
 
+  // ---- 音乐：搜索与登录 ----
+
+  const musicSearch = await invokeHandler('ui.music.search', { keywords: '周杰伦' });
+  if (!musicSearch || musicSearch.ok !== true) failures.push('音乐搜索失败: ' + JSON.stringify(musicSearch));
+  else {
+    if (musicSearch.songs.length !== 1) failures.push('音乐搜索未过滤缺少 hash 的条目');
+    if (musicSearch.songs[0].title !== '晴天') failures.push('音乐歌名映射错误');
+    if (musicSearch.songs[0].singer !== '周杰伦') failures.push('音乐歌手映射错误');
+  }
+
+  const searchReq = musicRequests.find((r) => r.path === '/search');
+  if (!searchReq) failures.push('未发出音乐搜索请求');
+  else {
+    if (!searchReq.query.includes('keywords=')) failures.push('音乐搜索未带 keywords');
+    if (!searchReq.query.includes('type=song')) failures.push('音乐搜索未带 type=song');
+  }
+
+  const emptyMusic = await invokeHandler('ui.music.search', { keywords: 'empty' });
+  if (!emptyMusic || emptyMusic.ok !== true || emptyMusic.songs.length !== 0) {
+    failures.push('音乐空结果处理异常');
+  }
+
+  // 关键回归：验证码走 query，登录走 JSON body。
+  const codeRes = await invokeHandler('ui.music.sendCode', { mobile: '13800000000' });
+  if (!codeRes || codeRes.ok !== true) failures.push('发送验证码被判为失败: ' + JSON.stringify(codeRes));
+  const codeReq = musicRequests.filter((r) => r.path === '/captcha/sent').pop();
+  if (!codeReq) failures.push('未发出验证码请求');
+  else {
+    if (!codeReq.query.includes('mobile=13800000000')) failures.push('验证码参数应放在 query');
+    if (codeReq.body) failures.push('验证码接口不应发送 JSON body');
+  }
+
+  const phoneLogin = await invokeHandler('ui.music.loginPhone', { mobile: '13800000000', code: '123456' });
+  if (!phoneLogin || phoneLogin.ok !== true) failures.push('手机号登录失败: ' + JSON.stringify(phoneLogin));
+  const loginReq = musicRequests.filter((r) => r.path === '/login/cellphone').pop();
+  if (!loginReq) failures.push('未发出登录请求');
+  else if (!loginReq.body || loginReq.body.mobile !== '13800000000' || loginReq.body.code !== '123456') {
+    failures.push('登录参数应以 JSON body 发送: ' + JSON.stringify(loginReq.body));
+  }
+
+  const musicAccount = await invokeHandler('ui.music.account');
+  if (!musicAccount || musicAccount.signedIn !== true) failures.push('登录后音乐账号状态未更新');
+  if (musicAccount && musicAccount.account && JSON.stringify(musicAccount.account).includes('TOKEN')) {
+    failures.push('音乐账号信息不应包含 token');
+  }
+  if (!files.get('data://music-session.json')) failures.push('音乐登录态未落盘');
+
+  const qr = await invokeHandler('ui.music.qr');
+  if (!qr || qr.ok !== true || !qr.key) failures.push('音乐二维码获取失败');
+  const poll1 = await invokeHandler('ui.music.qrCheck', { key: qr.key });
+  if (!poll1 || poll1.status !== 2) failures.push('扫码状态 2 未透出');
+  const poll2 = await invokeHandler('ui.music.qrCheck', { key: qr.key });
+  if (!poll2 || poll2.status !== 4 || !poll2.account) failures.push('扫码确认后未建立会话');
+
+  const musicTool = await invokeHandler('tools.searchMusic', { keywords: '周杰伦', pageSize: 5 });
+  if (!musicTool || musicTool.count !== 1) failures.push('tools.searchMusic 返回异常');
+
+  const accountTool = await invokeHandler('tools.musicAccount');
+  if (!accountTool || accountTool.signedIn !== true) failures.push('tools.musicAccount 状态错误');
+
+  const musicLogout = await invokeHandler('ui.music.logout');
+  if (!musicLogout || musicLogout.ok !== true) failures.push('音乐退出登录失败');
+  const afterLogout = await invokeHandler('ui.music.account');
+  if (afterLogout && afterLogout.signedIn !== false) failures.push('退出后音乐账号状态未清空');
+
   child.stdin.end();
   child.kill();
 
@@ -348,7 +492,7 @@ async function run() {
   console.log(
     JSON.stringify(
       {
-        handlers: 17,
+        handlers: 38,
         hostCalls: calls.length,
         savedConfigName: saved.settings.petName,
         overlayOpenAfterHide: hidden.settings.pet.enabled,

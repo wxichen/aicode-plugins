@@ -98,6 +98,53 @@
       </aicode-field>
     </aicode-group>
 
+    <aicode-group title="音乐搜索">
+      <div class="music-search">
+        <input
+          v-model="musicKeywords"
+          class="music-input"
+          type="search"
+          placeholder="搜索歌曲、歌手"
+          enterkeyhint="search"
+          @keyup.enter="searchMusic(1)"
+        />
+        <aicode-button :disabled="musicLoading || !musicKeywords.trim()" @click="searchMusic(1)">
+          {{ musicLoading ? '搜索中' : '搜索' }}
+        </aicode-button>
+      </div>
+      <button class="music-account-line" type="button" @click="openMusicAccount">
+        <span class="music-account-text">
+          <span class="music-account-title">音乐账号</span>
+          <span class="music-account-sub">{{ musicAccount ? musicAccount.nickname : '未登录（搜索无需登录）' }}</span>
+        </span>
+        <span class="music-account-action">{{ musicAccount ? '管理' : '登录' }}</span>
+      </button>
+      <p v-if="musicHint" class="voice-hint">{{ musicHint }}</p>
+      <div v-if="musicSongs.length" class="music-results">
+        <div v-for="song in musicSongs" :key="song.hash" class="music-item">
+          <img v-if="song.cover" class="music-cover" :src="song.cover" alt="" loading="lazy" />
+          <div v-else class="music-cover music-cover-empty"></div>
+          <div class="music-main">
+            <span class="music-title">{{ song.title }}</span>
+            <span class="music-meta">{{ song.singer }} · {{ song.album || '未知专辑' }}</span>
+            <span class="music-detail">{{ formatMusicDuration(song.duration) }}<template v-if="song.bitrate"> · {{ song.bitrate }}kbps</template></span>
+          </div>
+        </div>
+        <div class="music-pager">
+          <aicode-button :disabled="musicLoading || musicPage <= 1" @click="searchMusic(musicPage - 1)">上一页</aicode-button>
+          <span class="music-page-text">第 {{ musicPage }} 页</span>
+          <aicode-button :disabled="musicLoading" @click="searchMusic(musicPage + 1)">下一页</aicode-button>
+        </div>
+      </div>
+      <aicode-divider />
+      <aicode-field label="接口地址">
+        <aicode-input v-model="musicApiBaseUrl" placeholder="https://music.api.hoilai.cn" @blur="saveMusicSettings" />
+      </aicode-field>
+      <p class="voice-hint">
+        默认接口来自开源项目 kgka_Music_hl 的公开服务，可改为自建地址。
+      </p>
+    </aicode-group>
+
     <aicode-group title="互动与快捷操作">
       <div class="quick-actions">
         <aicode-button :disabled="busy" @click="interact('headpat')">摸摸头</aicode-button>
@@ -121,6 +168,49 @@
       <aicode-button :disabled="busy" @click="reset">恢复默认设置</aicode-button>
       <aicode-button variant="danger" :disabled="busy" @click="confirmOpen = true">重置并隐藏</aicode-button>
     </div>
+
+    <aicode-dialog v-model="musicAccountOpen" title="音乐账号" @confirm="musicAccountOpen = false">
+      <template v-if="musicAccount">
+        <div class="music-account-row">
+          <img v-if="musicAccount.avatarUrl" class="music-avatar" :src="musicAccount.avatarUrl" alt="" />
+          <div>
+            <div class="music-account-name">{{ musicAccount.nickname }}</div>
+            <div class="music-account-id">ID {{ musicAccount.userId || '未知' }}</div>
+          </div>
+        </div>
+        <div class="music-dialog-actions">
+          <aicode-button :disabled="musicBusy" @click="logoutMusic">退出登录</aicode-button>
+        </div>
+      </template>
+      <template v-else>
+        <div class="music-tabs">
+          <button class="music-tab" :class="{ active: musicTab === 'qr' }" type="button" @click="openMusicQr">扫码登录</button>
+          <button class="music-tab" :class="{ active: musicTab === 'phone' }" type="button" @click="musicTab = 'phone'">手机号</button>
+        </div>
+        <template v-if="musicTab === 'qr'">
+          <div class="music-qr-area">
+            <img v-if="musicQrImage" class="music-qr" :src="musicQrImage" alt="登录二维码" />
+            <span v-else class="music-qr-placeholder">正在获取二维码…</span>
+          </div>
+          <p class="voice-hint">{{ musicQrHint }}</p>
+        </template>
+        <template v-else>
+          <aicode-field label="手机号">
+            <aicode-input v-model="musicMobile" placeholder="11 位手机号" />
+          </aicode-field>
+          <aicode-field label="验证码">
+            <aicode-input v-model="musicCode" placeholder="短信验证码" />
+          </aicode-field>
+          <div class="music-dialog-actions">
+            <aicode-button :disabled="musicBusy || !musicMobile.trim()" @click="sendMusicCode">发送验证码</aicode-button>
+            <aicode-button variant="primary" :disabled="musicBusy || !musicMobile.trim() || !musicCode.trim()" @click="loginMusicByPhone">
+              登录
+            </aicode-button>
+          </div>
+        </template>
+      </template>
+      <p v-if="musicLoginHint" class="voice-hint">{{ musicLoginHint }}</p>
+    </aicode-dialog>
 
     <aicode-dialog v-model="confirmOpen" title="恢复默认设置" message="会重置所有外观、人设和通知选项，桌宠浮层也会按默认配置重新创建。" @confirm="reset" />
 
@@ -710,6 +800,233 @@ async function showPet(): Promise<void> {
   }
 }
 
+// ---- 音乐：搜索与账号登录 ----
+
+interface MusicAccount {
+  userId: string;
+  nickname: string;
+  avatarUrl: string;
+  savedAt: number;
+}
+
+interface MusicSong {
+  hash: string;
+  title: string;
+  singer: string;
+  album: string;
+  duration: number;
+  cover: string;
+  bitrate: number;
+}
+
+interface MusicSearchPayload {
+  ok?: boolean;
+  code?: string;
+  message?: string;
+  songs?: MusicSong[];
+  page?: number;
+}
+
+const musicKeywords = ref('');
+const musicSongs = ref<MusicSong[]>([]);
+const musicPage = ref(1);
+const musicLoading = ref(false);
+const musicHint = ref('');
+const musicApiBaseUrl = ref('https://music.api.hoilai.cn');
+
+const musicAccount = ref<MusicAccount | null>(null);
+const musicAccountOpen = ref(false);
+const musicTab = ref<'qr' | 'phone'>('qr');
+const musicQrImage = ref('');
+const musicQrKey = ref('');
+const musicQrHint = ref('');
+const musicMobile = ref('');
+const musicCode = ref('');
+const musicLoginHint = ref('');
+const musicBusy = ref(false);
+let musicQrTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopMusicQrPolling(): void {
+  if (musicQrTimer) {
+    clearInterval(musicQrTimer);
+    musicQrTimer = null;
+  }
+}
+
+function formatMusicDuration(seconds: number): string {
+  if (!seconds || seconds < 0) return '--:--';
+  const total = Math.round(seconds);
+  const mm = Math.floor(total / 60);
+  const ss = total % 60;
+  return mm + ':' + String(ss).padStart(2, '0');
+}
+
+async function refreshMusicAccount(): Promise<void> {
+  try {
+    const result = await aicode.invoke<{ signedIn?: boolean; account?: MusicAccount | null }>('ui.music.account');
+    musicAccount.value = result?.signedIn && result.account ? result.account : null;
+  } catch {
+    musicAccount.value = null;
+  }
+}
+
+async function loadMusicSettings(): Promise<void> {
+  const current = settings.value.music;
+  if (current?.apiBaseUrl) musicApiBaseUrl.value = current.apiBaseUrl;
+}
+
+async function saveMusicSettings(): Promise<void> {
+  try {
+    const result = await aicode.invoke<{ settings?: PetSettings }>('ui.settings.save', {
+      settings: { ...settings.value, music: { ...settings.value.music, apiBaseUrl: musicApiBaseUrl.value } }
+    });
+    if (result?.settings) settings.value = normalizeSettings(result.settings);
+    musicApiBaseUrl.value = settings.value.music.apiBaseUrl;
+  } catch (error) {
+    musicHint.value = '保存接口地址失败：' + (error as Error).message;
+  }
+}
+
+async function searchMusic(target: number): Promise<void> {
+  const word = musicKeywords.value.trim();
+  if (!word) return;
+  musicLoading.value = true;
+  musicHint.value = '';
+  try {
+    const result = await aicode.invoke<MusicSearchPayload>('ui.music.search', {
+      keywords: word,
+      page: target
+    });
+    if (result?.ok !== true) {
+      musicHint.value = result?.message || '搜索失败';
+      musicSongs.value = [];
+      return;
+    }
+    musicSongs.value = result.songs ?? [];
+    musicPage.value = result.page ?? target;
+    if (musicSongs.value.length === 0) musicHint.value = '没有找到结果，换个关键词试试。';
+  } catch (error) {
+    musicHint.value = '搜索失败：' + (error as Error).message;
+  } finally {
+    musicLoading.value = false;
+  }
+}
+
+function openMusicAccount(): void {
+  musicAccountOpen.value = true;
+  musicLoginHint.value = '';
+  if (musicAccount.value) return;
+  if (musicTab.value === 'qr') void openMusicQr();
+}
+
+async function openMusicQr(): Promise<void> {
+  musicTab.value = 'qr';
+  stopMusicQrPolling();
+  musicQrImage.value = '';
+  musicQrHint.value = '正在获取二维码…';
+  try {
+    const result = await aicode.invoke<{ ok?: boolean; key?: string; image?: string; message?: string }>('ui.music.qr');
+    if (result?.ok !== true || !result.key) {
+      musicQrHint.value = result?.message || '二维码获取失败';
+      return;
+    }
+    musicQrKey.value = result.key;
+    musicQrImage.value = result.image ?? '';
+    musicQrHint.value = '用酷狗音乐 App 扫码登录';
+    musicQrTimer = setInterval(() => {
+      void pollMusicQr();
+    }, 3000);
+  } catch (error) {
+    musicQrHint.value = '二维码获取失败：' + (error as Error).message;
+  }
+}
+
+async function pollMusicQr(): Promise<void> {
+  if (!musicQrKey.value || musicAccount.value) {
+    stopMusicQrPolling();
+    return;
+  }
+  try {
+    const result = await aicode.invoke<{
+      ok?: boolean;
+      status?: number;
+      message?: string;
+      account?: MusicAccount | null;
+    }>('ui.music.qrCheck', { key: musicQrKey.value });
+    if (result?.ok !== true) {
+      musicQrHint.value = result?.message || '二维码状态查询失败';
+      stopMusicQrPolling();
+      return;
+    }
+    const status = result.status ?? 0;
+    if (status === 2) musicQrHint.value = '已扫码，请在手机上确认';
+    else if (status === 4) {
+      musicQrHint.value = '登录成功';
+      stopMusicQrPolling();
+      musicAccount.value = result.account ?? null;
+      await refreshMusicAccount();
+    } else if (status === 0) {
+      musicQrHint.value = '二维码已过期，请重新打开';
+      stopMusicQrPolling();
+    }
+  } catch (error) {
+    musicQrHint.value = '状态查询失败：' + (error as Error).message;
+    stopMusicQrPolling();
+  }
+}
+
+async function sendMusicCode(): Promise<void> {
+  musicBusy.value = true;
+  musicLoginHint.value = '';
+  try {
+    const result = await aicode.invoke<{ ok?: boolean; message?: string }>('ui.music.sendCode', {
+      mobile: musicMobile.value.trim()
+    });
+    musicLoginHint.value = result?.ok === true ? '验证码已发送' : result?.message || '发送失败';
+  } catch (error) {
+    musicLoginHint.value = '发送失败：' + (error as Error).message;
+  } finally {
+    musicBusy.value = false;
+  }
+}
+
+async function loginMusicByPhone(): Promise<void> {
+  musicBusy.value = true;
+  musicLoginHint.value = '';
+  try {
+    const result = await aicode.invoke<{ ok?: boolean; message?: string; account?: MusicAccount | null }>(
+      'ui.music.loginPhone',
+      { mobile: musicMobile.value.trim(), code: musicCode.value.trim() }
+    );
+    if (result?.ok === true) {
+      musicLoginHint.value = '登录成功';
+      await refreshMusicAccount();
+      musicAccountOpen.value = false;
+    } else {
+      musicLoginHint.value = result?.message || '登录失败';
+    }
+  } catch (error) {
+    musicLoginHint.value = '登录失败：' + (error as Error).message;
+  } finally {
+    musicBusy.value = false;
+  }
+}
+
+async function logoutMusic(): Promise<void> {
+  musicBusy.value = true;
+  try {
+    await aicode.invoke('ui.music.logout');
+    musicAccount.value = null;
+    musicLoginHint.value = '已退出登录';
+    musicQrImage.value = '';
+    musicQrHint.value = '';
+  } catch (error) {
+    musicLoginHint.value = '退出失败：' + (error as Error).message;
+  } finally {
+    musicBusy.value = false;
+  }
+}
+
 onMounted(async () => {
   offEvents = aicode.events.on((event: AicodeEvent) => {
     if (event.name === 'pet.state' && event.payload && typeof event.payload === 'object') {
@@ -721,10 +1038,13 @@ onMounted(async () => {
   });
   await load();
   await loadTtsState();
+  await loadMusicSettings();
+  await refreshMusicAccount();
 });
 
 onBeforeUnmount(() => {
   if (offEvents) offEvents();
+  stopMusicQrPolling();
 });
 </script>
 
@@ -806,6 +1126,208 @@ onBeforeUnmount(() => {
 input[type='range'] {
   width: 100%;
   accent-color: var(--aicode-primary);
+}
+
+.music-search {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 16px 4px;
+}
+
+.music-input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--aicode-outline-variant);
+  border-radius: 10px;
+  background: var(--aicode-surface-container);
+  color: var(--aicode-on-surface);
+  font: inherit;
+}
+
+.music-account-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 16px;
+  border: none;
+  background: transparent;
+  color: var(--aicode-on-surface);
+  text-align: left;
+  font: inherit;
+}
+
+.music-account-line:active {
+  background: var(--aicode-surface-variant);
+}
+
+.music-account-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.music-account-title {
+  font-size: calc(16px * var(--aicode-font-scale));
+  line-height: 1.4;
+}
+
+.music-account-sub {
+  overflow: hidden;
+  color: var(--aicode-on-surface-variant);
+  font-size: calc(14px * var(--aicode-font-scale));
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-account-action {
+  flex: none;
+  color: var(--aicode-primary);
+  font-size: calc(14px * var(--aicode-font-scale));
+}
+
+.music-results {
+  padding: 0 8px;
+}
+
+.music-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 12px;
+}
+
+.music-cover {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--aicode-surface-variant);
+}
+
+.music-cover-empty {
+  display: block;
+}
+
+.music-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.music-title {
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-meta {
+  overflow: hidden;
+  color: var(--aicode-on-surface-variant);
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-detail {
+  color: var(--aicode-on-surface-variant);
+  font-size: 11px;
+  line-height: 1.4;
+  opacity: 0.8;
+}
+
+.music-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.music-page-text {
+  color: var(--aicode-on-surface-variant);
+  font-size: 12px;
+}
+
+.music-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.music-tab {
+  flex: 1;
+  height: 34px;
+  border: 1px solid var(--aicode-outline-variant);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--aicode-on-surface-variant);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.music-tab.active {
+  border-color: var(--aicode-primary);
+  color: var(--aicode-primary);
+}
+
+.music-qr-area {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 170px;
+}
+
+.music-qr {
+  width: 156px;
+  height: 156px;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.music-qr-placeholder {
+  color: var(--aicode-on-surface-variant);
+  font-size: 13px;
+}
+
+.music-account-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.music-avatar {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.music-account-name {
+  font-size: 15px;
+}
+
+.music-account-id {
+  color: var(--aicode-on-surface-variant);
+  font-size: 12px;
+}
+
+.music-dialog-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .tts-actions {

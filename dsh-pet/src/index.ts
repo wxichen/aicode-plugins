@@ -11,9 +11,20 @@ import {
 import { INTERACTIONS } from './shared/voice';
 import { listVoiceOptions, speak, voiceRequested } from './voiceGen';
 import { saveTtsKey, synthesize, ttsKeyPresent, listTtsPresets, probeTtsEndpoint } from './speech';
+import {
+  checkQrStatus,
+  fetchQrCode,
+  loginWithPhone,
+  MusicApiError,
+  refreshSession,
+  searchSongs,
+  sendLoginCode
+} from './music';
+import { normalizeSession, type MusicSession } from './shared/music';
 
 const CONFIG_PATH = 'data://config.json';
 const STATE_PATH = 'data://state.json';
+const MUSIC_SESSION_PATH = 'data://music-session.json';
 const PET_SURFACE = 'pet';
 const CREATE_WIDTH = 200;
 const CREATE_HEIGHT = 200;
@@ -113,6 +124,7 @@ function load(): Promise<void> {
       if (loaded) return;
       await loadSettings();
       await loadState();
+      await loadMusicSession();
       loaded = true;
     })().finally(() => {
       loadPromise = null;
@@ -126,6 +138,48 @@ async function persistSettings(): Promise<void> {
     path: CONFIG_PATH,
     content: JSON.stringify(settings, null, 2)
   });
+}
+
+let musicSession: MusicSession | null = null;
+
+async function loadMusicSession(): Promise<void> {
+  try {
+    const file = await hostCall<{ content?: unknown }>('host.fs.read', { path: MUSIC_SESSION_PATH });
+    musicSession = normalizeSession(typeof file?.content === 'string' ? JSON.parse(file.content) : null);
+  } catch {
+    musicSession = null;
+  }
+}
+
+async function persistMusicSession(): Promise<void> {
+  if (!musicSession) {
+    await hostCall('host.fs.delete', { path: MUSIC_SESSION_PATH }).catch(() => {});
+    return;
+  }
+  await hostCall('host.fs.write', {
+    path: MUSIC_SESSION_PATH,
+    content: JSON.stringify(musicSession, null, 2)
+  });
+}
+
+/** 只回传展示用的身份信息，token 不出进程。 */
+function publicMusicAccount(): Record<string, unknown> | null {
+  if (!musicSession) return null;
+  return {
+    userId: musicSession.userId,
+    nickname: musicSession.nickname || (musicSession.userId ? '用户 ' + musicSession.userId : '已登录'),
+    avatarUrl: musicSession.avatarUrl,
+    savedAt: musicSession.savedAt
+  };
+}
+
+function musicErrorCode(error: unknown): string {
+  if (error instanceof MusicApiError) return error.code;
+  if (typeof error === 'object' && error !== null) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && code) return code;
+  }
+  return 'MUSIC_ERROR';
 }
 
 async function ensureOverlay(): Promise<string> {
@@ -636,7 +690,143 @@ const handlers: Record<string, PluginHandler> = {
     return setSleeping(action === 'sleep' ? true : action === 'wake' ? false : !state.sleeping);
   },
 
-  'tools.interact': async (args: PluginArgs) => interact(readString(args, 'kind', 'headpat'))
+  'tools.interact': async (args: PluginArgs) => interact(readString(args, 'kind', 'headpat')),
+
+  // ---- 音乐：搜索与账号登录 ----
+
+  'ui.music.account': async () => {
+    await load();
+    return { signedIn: musicSession !== null, account: publicMusicAccount() };
+  },
+
+  'ui.music.search': async (args: PluginArgs) => {
+    await load();
+    const keywords = readString(args, 'keywords');
+    const page = Math.max(1, Number(args.page ?? 1) || 1);
+    const pageSize = Math.min(
+      50,
+      Math.max(1, Number(args.pageSize ?? settings.music.pageSize) || settings.music.pageSize)
+    );
+    try {
+      const result = await searchSongs(settings.music, musicSession, keywords, page, pageSize);
+      return { ok: true, ...result };
+    } catch (error) {
+      return { ok: false, code: musicErrorCode(error), message: errorMessage(error) };
+    }
+  },
+
+  'ui.music.sendCode': async (args: PluginArgs) => {
+    await load();
+    const mobile = readString(args, 'mobile');
+    if (!/^\d{6,15}$/.test(mobile)) {
+      return { ok: false, code: 'PARAM_INVALID', message: '手机号格式不正确' };
+    }
+    try {
+      await sendLoginCode(settings.music, mobile);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, code: musicErrorCode(error), message: errorMessage(error) };
+    }
+  },
+
+  'ui.music.loginPhone': async (args: PluginArgs) => {
+    await load();
+    const mobile = readString(args, 'mobile');
+    const code = readString(args, 'code');
+    if (!mobile || !code) {
+      return { ok: false, code: 'PARAM_INVALID', message: '手机号与验证码都要填' };
+    }
+    try {
+      musicSession = await loginWithPhone(settings.music, mobile, code);
+      await persistMusicSession();
+      return { ok: true, account: publicMusicAccount() };
+    } catch (error) {
+      return { ok: false, code: musicErrorCode(error), message: errorMessage(error) };
+    }
+  },
+
+  'ui.music.qr': async () => {
+    await load();
+    try {
+      return { ok: true, ...(await fetchQrCode(settings.music)) };
+    } catch (error) {
+      return { ok: false, code: musicErrorCode(error), message: errorMessage(error) };
+    }
+  },
+
+  'ui.music.qrCheck': async (args: PluginArgs) => {
+    await load();
+    const key = readString(args, 'key');
+    if (!key) return { ok: false, code: 'PARAM_INVALID', message: '缺少二维码 key' };
+    try {
+      const result = await checkQrStatus(settings.music, musicSession, key);
+      // 扫码确认后接口直接给 token，这里落盘成会话。
+      if (result.status === 4 && result.token) {
+        musicSession = {
+          userId: result.userId,
+          token: result.token,
+          t1: musicSession?.t1 ?? '',
+          sessionId: result.sessionId || result.token,
+          nickname: result.nickname,
+          avatarUrl: result.avatarUrl,
+          savedAt: Date.now()
+        };
+        await persistMusicSession();
+        return { ok: true, ...result, account: publicMusicAccount() };
+      }
+      return { ok: true, ...result };
+    } catch (error) {
+      return { ok: false, code: musicErrorCode(error), message: errorMessage(error) };
+    }
+  },
+
+  'ui.music.refresh': async () => {
+    await load();
+    if (!musicSession) return { ok: false, code: 'NO_SESSION', message: '尚未登录' };
+    try {
+      musicSession = await refreshSession(settings.music, musicSession);
+      await persistMusicSession();
+      return { ok: true, account: publicMusicAccount() };
+    } catch (error) {
+      return { ok: false, code: musicErrorCode(error), message: errorMessage(error) };
+    }
+  },
+
+  'ui.music.logout': async () => {
+    await load();
+    musicSession = null;
+    await persistMusicSession();
+    return { ok: true };
+  },
+
+  'tools.searchMusic': async (args: PluginArgs) => {
+    await load();
+    const keywords = readString(args, 'keywords');
+    const limit = Math.min(50, Math.max(1, Number(args.pageSize ?? 10) || 10));
+    const page = Math.max(1, Number(args.page ?? 1) || 1);
+    const result = await searchSongs(settings.music, musicSession, keywords, page, limit);
+    return {
+      keywords: result.keywords,
+      page: result.page,
+      count: result.songs.length,
+      songs: result.songs.map((song) => ({
+        title: song.title,
+        singer: song.singer,
+        album: song.album,
+        hash: song.hash,
+        duration: song.duration
+      }))
+    };
+  },
+
+  'tools.musicAccount': async () => {
+    await load();
+    return {
+      signedIn: musicSession !== null,
+      userId: musicSession?.userId ?? '',
+      nickname: musicSession?.nickname ?? ''
+    };
+  }
 };
 
 definePlugin({ handlers });

@@ -5,18 +5,17 @@ AiCode 插件源码集合。每个插件一个子目录，通过本仓库的 Git
 | 插件 | 目录 | 插件 ID | 安装包资产名 |
 | --- | --- | --- | --- |
 | AiCode 桌宠 | `dsh-pet/` | `wxichen.dsh-pet` | `wxichen.dsh-pet_<version>.zip` |
-| KA 音乐 | `kgka-music/` | `wxichen.kgka-music` | `wxichen.kgka-music_<version>.zip` |
 
 ## 构建
 
 每个插件都是独立的 TypeScript + Vue 项目，在插件目录内构建：
 
 ```bash
-cd dsh-pet          # 或 cd kgka-music
+cd dsh-pet
 npm install
 npm run typecheck
 npm run build       # 产出 dist/main.js 与 pages/
-npm test            # dsh-pet 与 kgka-music 各自带端到端测试
+npm test            # 端到端测试
 ```
 
 构建产物 `dist/` 与 `pages/` 不入库，由打包步骤生成。
@@ -37,6 +36,6 @@ npm test            # dsh-pet 与 kgka-music 各自带端到端测试
 MIT。
 
 - 桌宠美术与动画素材来自 [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet)。
-- KA 音乐的接口约定参考自 [umr-xiaomai/kgka_Music_hl](https://github.com/umr-xiaomai/kgka_Music_hl)（Flutter 客户端），
-  本插件为独立实现，未复制其源码；默认接口地址是该项目的公开服务 `https://music.api.hoilai.cn`，
-  可在插件设置里改为自建地址。使用前请自行确认该服务的可用性与使用条款。
+- 桌宠插件内的音乐搜索与账号登录，接口约定参考自 [umr-xiaomai/kgka_Music_hl](https://github.com/umr-xiaomai/kgka_Music_hl)，
+  为独立实现（未复制其源码）；默认接口地址是该项目的公开服务 `https://music.api.hoilai.cn`，可在插件设置里改为自建地址。
+  使用前请自行确认该服务的可用性与使用条款。

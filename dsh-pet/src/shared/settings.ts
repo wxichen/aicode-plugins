@@ -1,3 +1,5 @@
+import { normalizeMusicSettings } from './music';
+
 export type PetAnimation =
   | 'idle'
   | 'turn'
@@ -61,6 +63,11 @@ export interface PetSettings {
   notifyOnRunFinished: boolean;
   notifyOnToolError: boolean;
   workStatusEnabled: boolean;
+  /** 音乐搜索与账号登录（接口沿用 kgka_Music_hl 的公开服务）。 */
+  music: {
+    apiBaseUrl: string;
+    pageSize: number;
+  };
   animations: {
     idle: PetAnimation;
     turn: PetAnimation;
@@ -136,6 +143,10 @@ export const DEFAULT_SETTINGS: PetSettings = {
   notifyOnRunFinished: true,
   notifyOnToolError: true,
   workStatusEnabled: true,
+  music: {
+    apiBaseUrl: 'https://music.api.hoilai.cn',
+    pageSize: 30
+  },
   animations: {
     idle: 'idle',
     turn: 'turn',
@@ -240,6 +251,7 @@ export function normalizeSettings(raw: unknown): PetSettings {
     notifyOnRunFinished: readBoolean(input.notifyOnRunFinished, DEFAULT_SETTINGS.notifyOnRunFinished),
     notifyOnToolError: readBoolean(input.notifyOnToolError, DEFAULT_SETTINGS.notifyOnToolError),
     workStatusEnabled: readBoolean(input.workStatusEnabled, DEFAULT_SETTINGS.workStatusEnabled),
+    music: normalizeMusicSettings(input.music),
     animations: {
       idle: readAnimation(animationsRaw.idle, DEFAULT_SETTINGS.animations.idle),
       turn: readAnimation(animationsRaw.turn, DEFAULT_SETTINGS.animations.turn),

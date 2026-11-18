@@ -58,7 +58,7 @@ export interface QrCheckResult {
   sessionId: string;
 }
 
-export const DEFAULT_SETTINGS: MusicSettings = {
+export const DEFAULT_MUSIC_SETTINGS: MusicSettings = {
   apiBaseUrl: 'https://music.api.hoilai.cn',
   pageSize: 30
 };
@@ -66,16 +66,16 @@ export const DEFAULT_SETTINGS: MusicSettings = {
 const MAX_BASE_URL = 2048;
 
 export function normalizeBaseUrl(raw: unknown): string {
-  if (typeof raw !== 'string') return DEFAULT_SETTINGS.apiBaseUrl;
+  if (typeof raw !== 'string') return DEFAULT_MUSIC_SETTINGS.apiBaseUrl;
   const value = raw.trim().replace(/\/+$/, '');
-  if (!value || value.length > MAX_BASE_URL) return DEFAULT_SETTINGS.apiBaseUrl;
-  if (!/^https?:\/\//i.test(value)) return DEFAULT_SETTINGS.apiBaseUrl;
+  if (!value || value.length > MAX_BASE_URL) return DEFAULT_MUSIC_SETTINGS.apiBaseUrl;
+  if (!/^https?:\/\//i.test(value)) return DEFAULT_MUSIC_SETTINGS.apiBaseUrl;
   return value;
 }
 
-export function normalizeSettings(raw: unknown): MusicSettings {
+export function normalizeMusicSettings(raw: unknown): MusicSettings {
   const input = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
-  const size = typeof input.pageSize === 'number' && Number.isFinite(input.pageSize) ? input.pageSize : DEFAULT_SETTINGS.pageSize;
+  const size = typeof input.pageSize === 'number' && Number.isFinite(input.pageSize) ? input.pageSize : DEFAULT_MUSIC_SETTINGS.pageSize;
   return {
     apiBaseUrl: normalizeBaseUrl(input.apiBaseUrl),
     pageSize: Math.min(50, Math.max(1, Math.round(size)))

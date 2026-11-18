@@ -1,5 +1,5 @@
 import { hostCall } from '@jieapi/plugin-sdk';
-import type { MusicSession, MusicSettings, QrCheckResult, QrCodeInfo, SearchResult, SongItem } from './types';
+import type { MusicSession, MusicSettings, QrCheckResult, QrCodeInfo, SearchResult, SongItem } from './shared/music';
 
 /**
  * 酷狗接口封装（沿用 kgka_Music_hl 的公开服务）。
@@ -47,7 +47,8 @@ async function request(
   session: MusicSession | null,
   path: string,
   query: Record<string, unknown> = {},
-  method: 'GET' | 'POST' = 'GET'
+  method: 'GET' | 'POST' = 'GET',
+  jsonBody?: Record<string, unknown>
 ): Promise<{ payload: unknown; headers: Record<string, string> }> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (method === 'POST') headers['Content-Type'] = 'application/json';
@@ -61,6 +62,8 @@ async function request(
       url: joinUrl(settings.apiBaseUrl, path, query),
       method,
       headers,
+      // 部分接口要求 JSON 请求体（只放 query 会报「非空请求体」）。
+      body: jsonBody === undefined ? undefined : JSON.stringify(jsonBody),
       timeout: 30
     });
   } catch (error) {
@@ -182,14 +185,16 @@ export async function checkQrStatus(
 }
 
 export async function sendLoginCode(settings: MusicSettings, mobile: string): Promise<void> {
+  // 此接口只认 query，带 JSON body 反而会报 mobile 缺失。
   const { payload } = await request(settings, null, 'captcha/sent', { mobile }, 'POST');
   const obj = asRecord(payload);
-  const errorCode = pickNumber(obj, ['error_code', 'errorCode', 'status']);
-  // 酷狗习惯用 200 / 1 表示成功，空对象也视为成功；其余按 message 报错。
-  const ok = errorCode === 200 || errorCode === 1 || Object.keys(obj).length === 0;
+  const errorCode = pickNumber(obj, ['error_code', 'errorCode']);
+  const status = pickNumber(obj, ['status', 'code']);
+  // 实测成功响应为 {"code":0,"status":1,"error_code":0,"count":9}。
+  const ok = errorCode === 0 || status === 1 || Object.keys(obj).length === 0;
   if (!ok) {
     throw new MusicApiError(
-      pickString(obj, ['message', 'msg']) || `发送验证码失败（code=${errorCode}）`,
+      pickString(obj, ['message', 'msg']) || `发送验证码失败（code=${errorCode || status}）`,
       'CAPTCHA_FAILED'
     );
   }
@@ -200,7 +205,15 @@ export async function loginWithPhone(
   mobile: string,
   code: string
 ): Promise<MusicSession> {
-  const { payload, headers } = await request(settings, null, 'login/cellphone', { mobile, code }, 'POST');
+  // 登录接口要求 JSON body：只放 query 会返回 400「A non-empty request body is required」。
+  const { payload, headers } = await request(
+    settings,
+    null,
+    'login/cellphone',
+    {},
+    'POST',
+    { mobile, code }
+  );
   const obj = asRecord(payload);
   if (Array.isArray(obj.accounts) && obj.accounts.length > 0) {
     throw new MusicApiError(

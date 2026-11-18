@@ -14,7 +14,7 @@
     },
     "pageSize": {
       "type": "integer",
-      "description": "每页数量",
+      "description": "返回条数",
       "minimum": 1,
       "maximum": 50
     }
