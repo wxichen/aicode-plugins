@@ -369,27 +369,55 @@ interface SingPayload {
   url?: string;
   title?: string;
   lyrics?: LyricLine[];
-  chunks?: string[];
   mimeType?: string;
+  /** 进程内音频缓存 token：按此逐片拉取。 */
+  audioToken?: string;
+  chunkCount?: number;
 }
 
 /** 逐片读回音频并拼成 Blob，返回可直接播放的对象 URL。 */
-async function buildAudioUrlFromChunks(chunks: string[], mimeType: string): Promise<string> {
+/**
+ * 按 token 向进程逐片拉取音频（浮层没有 plugin.invoke，只能走 overlay 消息）。
+ * 每片对应同时到达的 pet.audioChunk 消息。
+ */
+function requestAudioChunk(token: string, index: number, timeoutMs = 8000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const key = token + ':' + index;
+    const timer = setTimeout(() => {
+      pendingChunks.delete(key);
+      reject(new Error('拉取第 ' + index + ' 片超时'));
+    }, timeoutMs);
+    pendingChunks.set(key, { resolve, reject, timer });
+    void aicode.overlay.postMessage({ type: 'pet.audioChunk', token, index }).catch((error) => {
+      clearTimeout(timer);
+      pendingChunks.delete(key);
+      reject(error);
+    });
+  });
+}
+
+const pendingChunks = new Map<
+  string,
+  { resolve: (value: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
+>();
+
+/** 把进程回的片消息交给等待中的 Promise。 */
+function settleAudioChunk(message: Record<string, unknown>): void {
+  const token = typeof message.token === 'string' ? message.token : '';
+  const index = typeof message.index === 'number' ? message.index : 0;
+  const waiter = pendingChunks.get(token + ':' + index);
+  if (!waiter) return;
+  pendingChunks.delete(token + ':' + index);
+  clearTimeout(waiter.timer);
+  if (typeof message.base64 === 'string' && message.base64) waiter.resolve(message.base64);
+  else waiter.reject(new Error(typeof message.error === 'string' ? message.error : '切片为空'));
+}
+
+async function buildAudioUrlFromToken(token: string, count: number, mimeType: string): Promise<string> {
   const parts: BlobPart[] = [];
-  for (const path of chunks) {
-    let file;
-    try {
-      file = await aicode.fs.readBinary(path);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      reportSingError('readBinary', message, path);
-      throw new Error('音频切片读取失败（' + path + '）：' + message);
-    }
-    if (!file || typeof file.base64 !== 'string' || !file.base64) {
-      reportSingError('readBinaryEmpty', 'empty base64', path);
-      throw new Error('音频切片为空：' + path);
-    }
-    const binary = atob(file.base64);
+  for (let index = 0; index < count; index += 1) {
+    const base64 = await requestAudioChunk(token, index);
+    const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
     parts.push(bytes);
@@ -400,9 +428,9 @@ async function buildAudioUrlFromChunks(chunks: string[], mimeType: string): Prom
 function playSong(song: SingPayload | null): void {
   if (!song) return;
   setLyrics(song.lyrics);
-  // 音频一律以切片形式下发（进程下载），这里读回拼成 Blob 播放。
-  if (song.chunks && song.chunks.length > 0) {
-    void playChunkedSong(song as SingPayload & { chunks: string[] });
+  // 音频由进程下载并缓存，这里按 token 逐片拉取后拼成 Blob 播放。
+  if (song.audioToken && (song.chunkCount ?? 0) > 0) {
+    void playChunkedSong(song as SingPayload & { audioToken: string; chunkCount: number });
     return;
   }
   if (song.url) {
@@ -447,9 +475,14 @@ async function playDirectUrl(url: string, mimeType?: string): Promise<void> {
 
 let objectUrl: string | null = null;
 
-async function playChunkedSong(song: SingPayload & { chunks: string[] }): Promise<void> {
+async function playChunkedSong(song: SingPayload & { audioToken: string; chunkCount: number }): Promise<void> {
   try {
-    const url = await buildAudioUrlFromChunks(song.chunks, song.mimeType || 'audio/mpeg');    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    const url = await buildAudioUrlFromToken(
+      song.audioToken,
+      song.chunkCount,
+      song.mimeType || 'audio/mpeg'
+    );
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
     objectUrl = url;
     if (!songEl) {
       songEl = new Audio();
@@ -682,15 +715,22 @@ function onMessage(raw: OverlayMessage): void {
   } else if (message.type === 'pet.speech') {
     playSpeech(message.audio as SpeechAudio | null);
   } else if (message.type === 'pet.sing') {
-    // 进程把歌词放在消息顶层，这里合并进 song，保持 playSong 单一入口。
+    // 进程把歌词与音频 token 放在消息顶层，这里合并，保持 playSong 单一入口。
     const song = message.song as { url?: string; title?: string; cover?: string } | null;
     const lines = Array.isArray(message.lyrics) ? (message.lyrics as LyricLine[]) : [];
-    const chunks = Array.isArray(message.chunks) ? (message.chunks as string[]) : [];
     playSong(
       song
-        ? { ...song, lyrics: lines, chunks, mimeType: typeof message.mimeType === 'string' ? message.mimeType : '' }
+        ? {
+            ...song,
+            lyrics: lines,
+            audioToken: typeof message.audioToken === 'string' ? message.audioToken : '',
+            chunkCount: typeof message.chunkCount === 'number' ? message.chunkCount : 0,
+            mimeType: typeof message.mimeType === 'string' ? message.mimeType : ''
+          }
         : null
     );
+  } else if (message.type === 'pet.audioChunk') {
+    settleAudioChunk(message);
   } else if (message.type === 'pet.singStop') {
     stopSong();
   } else if (message.type === 'click') {

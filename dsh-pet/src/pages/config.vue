@@ -1396,16 +1396,16 @@ async function playSongItem(song: MusicSong): Promise<void> {
       reason?: string;
       code?: string;
       message?: string;
-      chunks?: string[];
+      audioToken?: string;
       mimeType?: string;
     }>('ui.music.playUrl', { song });
     if (result?.ok !== true) {
       musicHint.value = result?.reason || result?.message || '无法播放';
       return;
     }
-    const chunks = result.chunks ?? [];
+    const token = result.audioToken ?? '';
     musicHint.value =
-      chunks.length > 0 ? '正在播放：' + song.title + '（若无声，先点一下桌宠）' : '音频下载失败，请重试';
+      token ? '正在播放：' + song.title + '（若无声，先点一下桌宠）' : '音频准备失败，请重试';
   } catch (error) {
     musicHint.value = '播放失败：' + (error as Error).message;
   } finally {

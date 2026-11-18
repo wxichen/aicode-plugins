@@ -17,7 +17,6 @@ import {
   loginWithPhone,
   MusicApiError,
   refreshSession,
-  downloadAudioChunks,
   fetchAccountPlaylists,
   fetchLyrics,
   fetchPlaylistSongs,
@@ -26,7 +25,7 @@ import {
   sendLoginCode
 } from './music';
 import { normalizeSession, type FavoriteList, type MusicSession, type SongItem } from './shared/music';
-import type { DownloadedAudio } from './music';
+import { AUDIO_CHUNK_BYTES, downloadAudio, sliceAudioBase64, type AudioBuffer } from './music';
 import type { LyricLine } from './music';
 
 const CONFIG_PATH = 'data://config.json';
@@ -263,6 +262,21 @@ async function playSong(
   }
 }
 
+/** 待播音频的进程内缓存：页面通过 token 分片拉取，避免走文件系统。 */
+const audioCache = new Map<string, { chunks: string[]; mimeType: string; createdAt: number }>();
+
+function cacheAudio(audio: AudioBuffer): string {
+  // 只保留最近一次播放，避免内存堆积。
+  audioCache.clear();
+  const token = 'a' + Date.now().toString(36);
+  audioCache.set(token, {
+    chunks: sliceAudioBase64(audio, AUDIO_CHUNK_BYTES),
+    mimeType: audio.mimeType,
+    createdAt: Date.now()
+  });
+  return token;
+}
+
 /** 桌宠“唱歌”：从给定歌曲池或本地收藏随机挑一首，推给浮层播放。 */
 async function singFromPool(songs: SongItem[]): Promise<Record<string, unknown>> {
   await load();
@@ -294,18 +308,20 @@ async function singFromPool(songs: SongItem[]): Promise<Record<string, unknown>>
       return { ok: false, code: opened.code || 'OVERLAY_FAILED', message: opened.message || '浮层不可用' };
     }
   }
-  // 由进程下载切片，浮层读回拼 Blob 播放：不跳浏览器，也不受混合内容限制。
-  let audio: DownloadedAudio;
+  // 进程下载后留在内存，浮层按片拉取（不经文件系统，避开 data:// 映射差异）。
+  let audio: AudioBuffer;
   try {
-    audio = await downloadAudioChunks(song.hash, played.url);
+    audio = await downloadAudio(played.url);
   } catch (error) {
     return { ok: false, code: errorCode(error) || 'AUDIO_FAILED', message: errorMessage(error) };
   }
+  const token = cacheAudio(audio);
   await postOverlay({
     type: 'pet.sing',
     song: { title: song.title, singer: song.singer, cover: song.cover, url: '' },
     lyrics,
-    chunks: audio.chunks,
+    audioToken: token,
+    chunkCount: Math.ceil(audio.totalBytes / AUDIO_CHUNK_BYTES),
     mimeType: audio.mimeType
   });
   return {
@@ -313,7 +329,7 @@ async function singFromPool(songs: SongItem[]): Promise<Record<string, unknown>>
     song: { title: song.title, singer: song.singer },
     player: 'overlay',
     lyrics: lyrics.length,
-    chunks: audio.chunks.length
+    audioToken: token
   };
 }
 
@@ -711,6 +727,30 @@ const handlers: Record<string, PluginHandler> = {
     if (type === 'pet.sing') {
       return singFromFavorites(readString(payload, 'listId') || undefined);
     }
+    if (type === 'pet.audioChunk') {
+      // 浮层没有 plugin.invoke，只能通过消息拉取音频片：按 token + index 回推。
+      const token = readString(payload, 'token');
+      const index = Math.max(0, Number(payload.index ?? 0) || 0);
+      const cached = audioCache.get(token);
+      if (!cached) {
+        await postOverlay({ type: 'pet.audioChunk', token, index, error: 'token 已失效' });
+        return { ok: false, message: 'token 已失效' };
+      }
+      const base64 = cached.chunks[index];
+      if (base64 === undefined) {
+        await postOverlay({ type: 'pet.audioChunk', token, index, error: '片索引越界' });
+        return { ok: false, message: '片索引越界' };
+      }
+      await postOverlay({
+        type: 'pet.audioChunk',
+        token,
+        index,
+        base64,
+        total: cached.chunks.length,
+        mimeType: cached.mimeType
+      });
+      return { ok: true };
+    }
     if (type === 'pet.stopSing') {
       await postOverlay({ type: 'pet.singStop' });
       return { ok: true };
@@ -1102,22 +1142,22 @@ const handlers: Record<string, PluginHandler> = {
       albumAudioId: song.albumAudioId
     });
     if (!played.ok) return played;
-    // 一律由进程下载切片，再推给浮层读回拼 Blob 播放：
-    // 既不跳浏览器，也不受 WebView 混合内容限制。
+    // 进程下载后缓存，浮层按片拉取（不经文件系统）。
     try {
-      const audio = await downloadAudioChunks(song.hash, played.url);
+      const audio = await downloadAudio(played.url);
       if (!overlayId) {
         const opened = await openPet();
         if (!opened.ok) {
           return { ok: false, code: opened.code || 'OVERLAY_FAILED', message: opened.message || '桌宠浮层不可用' };
         }
       }
-      // 关键：把切片推给浮层，由浮层真正播放（不能只返回路径）。
+      const token = cacheAudio(audio);
       await postOverlay({
         type: 'pet.sing',
         song: { title: song.title ?? '', singer: song.singer ?? '', cover: song.cover ?? '', url: '' },
         lyrics: [],
-        chunks: audio.chunks,
+        audioToken: token,
+        chunkCount: Math.ceil(audio.totalBytes / AUDIO_CHUNK_BYTES),
         mimeType: audio.mimeType
       });
       return {
@@ -1126,7 +1166,7 @@ const handlers: Record<string, PluginHandler> = {
         reason: '',
         code: '',
         player: 'overlay',
-        chunks: audio.chunks,
+        audioToken: token,
         mimeType: audio.mimeType,
         totalBytes: audio.totalBytes
       };

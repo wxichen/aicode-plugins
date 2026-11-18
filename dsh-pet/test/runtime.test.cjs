@@ -585,11 +585,22 @@ async function run() {
   const playOk = await invokeHandler('ui.music.playUrl', { song: favSong });
   if (!playOk || playOk.ok !== true || !playOk.url) failures.push('登录后取播放地址失败: ' + JSON.stringify(playOk));
 
-  if (playOk && (!playOk.chunks || playOk.chunks.length === 0)) failures.push('播放未返回音频切片');
+  if (playOk && !playOk.audioToken) failures.push('播放未返回音频 token');
   const singPush = calls.filter((c) => c.overlay && c.overlay.type === 'pet.sing').pop();
-  if (!singPush) failures.push('播放未把切片推给浮层');
-  else if (!Array.isArray(singPush.overlay.chunks) || singPush.overlay.chunks.length === 0) {
-    failures.push('推送的 pet.sing 缺少 chunks');
+  if (!singPush) failures.push('播放未把音频推给浮层');
+  else {
+    if (!singPush.overlay.audioToken) failures.push('推送的 pet.sing 缺少 audioToken');
+    if (!(singPush.overlay.chunkCount > 0)) failures.push('推送的 pet.sing 缺少 chunkCount');
+    if (singPush.overlay.mimeType !== 'audio/mpeg') {
+      failures.push('音频 MIME 应为 audio/mpeg，实际 ' + singPush.overlay.mimeType);
+    }
+  }
+  // 按 token 拉首片，确认能取到 base64
+  const ovToken = singPush && singPush.overlay.audioToken;
+  if (ovToken) {
+    await invokeHandler('overlay.message', { overlayId: 'overlay-1', payload: { type: 'pet.audioChunk', token: ovToken, index: 0 } });
+    const chunkPush = calls.filter((c) => c.overlay && c.overlay.type === 'pet.audioChunk').pop();
+    if (!chunkPush || !chunkPush.overlay.base64) failures.push('按 token 拉取音频片失败');
   }
   if (calls.some((c) => c.openUrl)) failures.push('不应再调用 openUrl（会跳浏览器）');
 

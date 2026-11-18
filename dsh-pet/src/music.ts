@@ -458,22 +458,24 @@ export async function fetchLyrics(
   return { ok: true, lines, reason: '' };
 }
 
-/**
- * 下载音频并按片写入插件数据目录。
- *
- * 为什么不让页面直接播：酷狗 CDN 只给 http，而插件 WebView 禁止混合内容；
- * host.ui.openUrl 又会被浏览器接手。于是由进程下载，页面分片读回再拼成 Blob 播放。
- * 每片取 400 KiB（base64 约 533 KiB，低于页面单次读取 512 KiB 的限制需要更小）。
- */
-export const AUDIO_CHUNK_BYTES = 256 * 1024;
+/** 单片大小：base64 后约 267 KiB，低于页面单次可接收上限。 */
+export const AUDIO_CHUNK_BYTES = 200 * 1024;
 
-export interface DownloadedAudio {
-  /** 片文件路径，按 index 顺序拼接即完整音频。 */
-  chunks: string[];
-  mimeType: string;
-  totalBytes: number;
-  /** 供页面快速判断是否可播 */
-  songKey: string;
+/* 音频由进程下载后保留在内存，页面按片拉取（不经文件系统，避免 data:// 映射差异）。 */
+
+/**
+ * 推断音频 MIME：CDN 常返回 application/octet-stream，必须按魔数纠正，
+ * 否则 Blob 类型不对会导致 <audio> 解码失败。
+ */
+function guessAudioMime(contentType: string, bytes: Buffer): string {
+  const header = contentType.split(';')[0].trim().toLowerCase();
+  if (header.startsWith('audio/')) return header;
+  if (bytes.length >= 3 && bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return 'audio/mpeg';
+  if (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return 'audio/mpeg';
+  if (bytes.length >= 4 && bytes.toString('ascii', 0, 4) === 'RIFF') return 'audio/wav';
+  if (bytes.length >= 4 && bytes.toString('ascii', 0, 4) === 'fLaC') return 'audio/flac';
+  if (bytes.length >= 4 && bytes.toString('ascii', 4, 8) === 'ftyp') return 'audio/mp4';
+  return 'audio/mpeg';
 }
 
 async function fetchAudioBytes(
@@ -512,12 +514,13 @@ async function fetchAudioBytes(
           chunks.push(chunk);
           onProgress?.(received);
         });
-        res.on('end', () =>
+        res.on('end', () => {
+          const merged = Buffer.concat(chunks);
           resolve({
-            bytes: Buffer.concat(chunks),
-            mimeType: String(res.headers['content-type'] ?? 'audio/mpeg').split(';')[0]
-          })
-        );
+            bytes: merged,
+            mimeType: guessAudioMime(String(res.headers['content-type'] ?? ''), merged)
+          });
+        });
       }
     );
     req.on('timeout', () => {
@@ -532,26 +535,28 @@ async function fetchAudioBytes(
 }
 
 /** 下载并把音频切片写入 data://audio/，返回片路径。页面负责读回拼装。 */
-export async function downloadAudioChunks(
-  songKey: string,
+/** 进程内存里保留的待播音频，供页面按片拉取。 */
+export interface AudioBuffer {
+  bytes: Buffer;
+  mimeType: string;
+  totalBytes: number;
+}
+
+export async function downloadAudio(
   url: string
-): Promise<DownloadedAudio> {
+): Promise<AudioBuffer> {
   const { bytes, mimeType } = await fetchAudioBytes(url);
-  const dir = `data://audio/${songKey}`;
-  // 覆盖前先清掉旧片，避免上次更长的音频留下尾巴。
-  await hostCall('host.fs.delete', { path: dir }).catch(() => {});
-  await hostCall('host.fs.mkdir', { path: dir }).catch(() => {});
+  return { bytes, mimeType, totalBytes: bytes.length };
+}
+
+/** 把音频按片切成 base64，每片不超过页面单次可接收的大小。 */
+export function sliceAudioBase64(
+  audio: AudioBuffer,
+  chunkBytes = 200 * 1024
+): string[] {
   const chunks: string[] = [];
-  for (let offset = 0, index = 0; offset < bytes.length; offset += AUDIO_CHUNK_BYTES, index += 1) {
-    const slice = bytes.subarray(offset, offset + AUDIO_CHUNK_BYTES);
-    const path = `${dir}/${index}.bin`;
-    await hostCall('host.fs.writeBinary', { path, base64: slice.toString('base64') });
-    chunks.push(path);
+  for (let offset = 0; offset < audio.bytes.length; offset += chunkBytes) {
+    chunks.push(audio.bytes.subarray(offset, offset + chunkBytes).toString('base64'));
   }
-  // 写完校验第一片能读回，避免“看似成功、实际空文件”。
-  const check = await hostCall<{ base64?: string }>('host.fs.readBinary', { path: chunks[0] });
-  if (!check?.base64) {
-    throw new MusicApiError('音频切片写入后无法读回，可能是数据目录不可写', 'AUDIO_WRITE_FAILED');
-  }
-  return { chunks, mimeType, totalBytes: bytes.length, songKey };
+  return chunks;
 }
