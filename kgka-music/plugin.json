@@ -1,0 +1,67 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jieapi/AiCode/main/plugins/schema/plugin.schema.json",
+  "manifestVersion": 1,
+  "id": "wxichen.kgka-music",
+  "name": {
+    "default": "KA Music",
+    "zh-CN": "KA 音乐"
+  },
+  "version": "0.1.0",
+  "publisher": "wxichen",
+  "repository": "https://github.com/wxichen/aicode-plugins",
+  "description": {
+    "default": "Search Kugou songs and sign in with a phone number or QR code inside AiCode. Playback is left to the system.",
+    "zh-CN": "在 AiCode 里搜索酷狗歌曲，支持手机验证码与扫码登录。接口沿用开源项目 kgka_Music_hl 的公开服务。"
+  },
+  "license": "MIT",
+  "engines": {
+    "pluginApi": "^1.0.0"
+  },
+  "runtime": {
+    "type": "javascript",
+    "entry": "dist/main.js"
+  },
+  "contributes": {
+    "configPage": "pages/config.html",
+    "uiEntries": [
+      {
+        "id": "music",
+        "title": {
+          "default": "KA Music",
+          "zh-CN": "音乐搜索"
+        },
+        "slot": "drawer.footer",
+        "page": "pages/config.html",
+        "icon": "cloud"
+      }
+    ],
+    "tools": [
+      {
+        "id": "search",
+        "title": {
+          "default": "Search Music",
+          "zh-CN": "搜索歌曲"
+        },
+        "description": {
+          "default": "Search Kugou songs by keyword and return title, singer, album and hash.",
+          "zh-CN": "按关键词搜索酷狗歌曲，返回歌名、歌手、专辑与文件哈希。"
+        },
+        "inputSchema": "schemas/search.input.json",
+        "handler": "tools.search"
+      },
+      {
+        "id": "login-status",
+        "title": {
+          "default": "Music Login Status",
+          "zh-CN": "音乐账号状态"
+        },
+        "description": {
+          "default": "Report whether a Kugou account is signed in.",
+          "zh-CN": "查询当前是否已登录音乐账号，返回昵称与用户 ID。"
+        },
+        "inputSchema": "schemas/status.input.json",
+        "handler": "tools.loginStatus"
+      }
+    ]
+  }
+}
