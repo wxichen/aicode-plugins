@@ -924,6 +924,8 @@ interface MusicSong {
   duration: number;
   cover: string;
   bitrate: number;
+  albumId?: string;
+  albumAudioId?: string;
 }
 
 interface MusicSearchPayload {
@@ -1385,15 +1387,22 @@ async function singFromPet(): Promise<void> {
 async function playSongItem(song: MusicSong): Promise<void> {
   musicBusy.value = true;
   try {
-    const result = await aicode.invoke<{ ok?: boolean; url?: string; reason?: string; code?: string }>(
-      'ui.music.playUrl',
-      { song }
-    );
-    if (result?.ok !== true || !result.url) {
-      musicHint.value = result?.reason || '无法播放';
+    const result = await aicode.invoke<{
+      ok?: boolean;
+      url?: string;
+      reason?: string;
+      code?: string;
+      message?: string;
+      chunks?: string[];
+      mimeType?: string;
+    }>('ui.music.playUrl', { song });
+    if (result?.ok !== true) {
+      musicHint.value = result?.reason || result?.message || '无法播放';
       return;
     }
-    musicHint.value = '正在播放：' + song.title;
+    const chunks = result.chunks ?? [];
+    musicHint.value =
+      chunks.length > 0 ? '正在播放：' + song.title : '音频下载失败，请重试';
   } catch (error) {
     musicHint.value = '播放失败：' + (error as Error).message;
   } finally {

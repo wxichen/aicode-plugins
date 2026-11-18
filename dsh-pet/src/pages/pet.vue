@@ -358,10 +358,36 @@ function startExternalLyrics(): void {
   }, 250);
 }
 
-function playSong(song: { url?: string; title?: string; lyrics?: LyricLine[] } | null): void {
+interface SingPayload {
+  url?: string;
+  title?: string;
+  lyrics?: LyricLine[];
+  chunks?: string[];
+  mimeType?: string;
+}
+
+/** 逐片读回音频并拼成 Blob，返回可直接播放的对象 URL。 */
+async function buildAudioUrlFromChunks(chunks: string[], mimeType: string): Promise<string> {
+  const parts: BlobPart[] = [];
+  for (const path of chunks) {
+    const file = await aicode.fs.readBinary(path);
+    const binary = atob(file.base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    parts.push(bytes);
+  }
+  return URL.createObjectURL(new Blob(parts, { type: mimeType || 'audio/mpeg' }));
+}
+
+function playSong(song: SingPayload | null): void {
   if (!song) return;
   setLyrics(song.lyrics);
-  // 由系统播放器出声时没有 audio 元素，用墙钟时间驱动歌词。
+  // 进程把音频切片放在 data://，这里读回拼成 Blob 播放（http 直链会被混合内容拦截）。
+  if (song.chunks && song.chunks.length > 0) {
+    void playChunkedSong(song as SingPayload & { chunks: string[] });
+    return;
+  }
+  // 既没有 chunks 也没有直链时，只用墙钟时间滚歌词。
   if (!song.url) {
     startExternalLyrics();
     return;
@@ -390,6 +416,38 @@ function playSong(song: { url?: string; title?: string; lyrics?: LyricLine[] } |
   startLyricTimer();
 }
 
+let objectUrl: string | null = null;
+
+async function playChunkedSong(song: SingPayload & { chunks: string[] }): Promise<void> {
+  try {
+    const url = await buildAudioUrlFromChunks(song.chunks, song.mimeType || 'audio/mpeg');
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    objectUrl = url;
+    if (!songEl) {
+      songEl = new Audio();
+      songEl.preload = 'auto';
+      songEl.addEventListener('ended', () => {
+        singing.value = false;
+        stopLyricTimer();
+        bubbleText.value = '';
+      });
+      songEl.addEventListener('error', () => {
+        singing.value = false;
+        stopLyricTimer();
+      });
+    }
+    speechEl?.pause();
+    songEl.src = url;
+    singing.value = true;
+    await songEl.play();
+    startLyricTimer();
+  } catch (error) {
+    singing.value = false;
+    stopLyricTimer();
+    showBubble('这首唱不了：' + (error as Error).message);
+  }
+}
+
 function stopSong(): void {
   if (songEl) {
     songEl.pause();
@@ -399,6 +457,10 @@ function stopSong(): void {
   stopLyricTimer();
   lyrics.value = [];
   bubbleText.value = '';
+  if (objectUrl) {
+    URL.revokeObjectURL(objectUrl);
+    objectUrl = null;
+  }
 }
 
 async function doSing(): Promise<void> {
@@ -535,7 +597,12 @@ function onMessage(raw: OverlayMessage): void {
     // 进程把歌词放在消息顶层，这里合并进 song，保持 playSong 单一入口。
     const song = message.song as { url?: string; title?: string; cover?: string } | null;
     const lines = Array.isArray(message.lyrics) ? (message.lyrics as LyricLine[]) : [];
-    playSong(song ? { ...song, lyrics: lines } : null);
+    const chunks = Array.isArray(message.chunks) ? (message.chunks as string[]) : [];
+    playSong(
+      song
+        ? { ...song, lyrics: lines, chunks, mimeType: typeof message.mimeType === 'string' ? message.mimeType : '' }
+        : null
+    );
   } else if (message.type === 'pet.singStop') {
     stopSong();
   } else if (message.type === 'click') {

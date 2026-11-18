@@ -457,3 +457,96 @@ export async function fetchLyrics(
   if (lines.length === 0) return { ok: false, lines: [], reason: '歌词内容为空' };
   return { ok: true, lines, reason: '' };
 }
+
+/**
+ * 下载音频并按片写入插件数据目录。
+ *
+ * 为什么不让页面直接播：酷狗 CDN 只给 http，而插件 WebView 禁止混合内容；
+ * host.ui.openUrl 又会被浏览器接手。于是由进程下载，页面分片读回再拼成 Blob 播放。
+ * 每片取 400 KiB（base64 约 533 KiB，低于页面单次读取 512 KiB 的限制需要更小）。
+ */
+export const AUDIO_CHUNK_BYTES = 320 * 1024;
+
+export interface DownloadedAudio {
+  /** 片文件路径，按 index 顺序拼接即完整音频。 */
+  chunks: string[];
+  mimeType: string;
+  totalBytes: number;
+  /** 供页面快速判断是否可播 */
+  songKey: string;
+}
+
+async function fetchAudioBytes(
+  url: string,
+  onProgress?: (received: number) => void
+): Promise<{ bytes: Buffer; mimeType: string }> {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new MusicApiError('音频地址必须是 http 或 https', 'PARAM_INVALID');
+  }
+  const transport = require(parsed.protocol === 'https:' ? 'https' : 'http') as typeof import('https');
+  return new Promise((resolve, reject) => {
+    const req = transport.request(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method: 'GET',
+        timeout: 60_000
+      },
+      (res) => {
+        if ((res.statusCode ?? 0) < 200 || (res.statusCode ?? 0) >= 300) {
+          reject(new MusicApiError(`音频下载失败 ${res.statusCode}`, 'AUDIO_HTTP'));
+          res.resume();
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let received = 0;
+        res.on('data', (chunk: Buffer) => {
+          received += chunk.length;
+          // 限制单曲大小，避免把数据目录写满（128k mp3 约 4 MB）。
+          if (received > 24 * 1024 * 1024) {
+            req.destroy();
+            return;
+          }
+          chunks.push(chunk);
+          onProgress?.(received);
+        });
+        res.on('end', () =>
+          resolve({
+            bytes: Buffer.concat(chunks),
+            mimeType: String(res.headers['content-type'] ?? 'audio/mpeg').split(';')[0]
+          })
+        );
+      }
+    );
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new MusicApiError('音频下载超时', 'AUDIO_TIMEOUT'));
+    });
+    req.on('error', (error) =>
+      reject(new MusicApiError(`音频下载失败：${error.message}`, 'AUDIO_NETWORK'))
+    );
+    req.end();
+  });
+}
+
+/** 下载并把音频切片写入 data://audio/，返回片路径。页面负责读回拼装。 */
+export async function downloadAudioChunks(
+  songKey: string,
+  url: string
+): Promise<DownloadedAudio> {
+  const { bytes, mimeType } = await fetchAudioBytes(url);
+  const dir = `data://audio/${songKey}`;
+  // 覆盖前先清掉旧片，避免上次更长的音频留下尾巴。
+  await hostCall('host.fs.delete', { path: dir }).catch(() => {});
+  await hostCall('host.fs.mkdir', { path: dir }).catch(() => {});
+  const chunks: string[] = [];
+  for (let offset = 0, index = 0; offset < bytes.length; offset += AUDIO_CHUNK_BYTES, index += 1) {
+    const slice = bytes.subarray(offset, offset + AUDIO_CHUNK_BYTES);
+    const path = `${dir}/${index}.bin`;
+    await hostCall('host.fs.writeBinary', { path, base64: slice.toString('base64') });
+    chunks.push(path);
+  }
+  return { chunks, mimeType, totalBytes: bytes.length, songKey };
+}

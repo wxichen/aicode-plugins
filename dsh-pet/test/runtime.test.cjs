@@ -4,6 +4,13 @@ const { spawn } = require('child_process');
 const path = require('path');
 
 const entry = path.join(__dirname, '..', 'dist/main.js');
+const audioServer = require('http').createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'audio/mpeg' });
+  res.end(Buffer.alloc(1024, 1));
+});
+let audioPort = 0;
+const audioReady = new Promise((resolve) => audioServer.listen(0, '127.0.0.1', () => { audioPort = audioServer.address().port; resolve(); }));
+
 const child = spawn(process.execPath, [entry], { stdio: ['pipe', 'pipe', 'pipe'] });
 
 let seq = 0;
@@ -37,6 +44,11 @@ hostHandlers.set('host.fs.read', async (params) => {
   files.set(String(params.path), String(params.content));
   return { ok: true };
 });
+hostHandlers.set('host.fs.writeBinary', async (params) => {
+  files.set(String(params.path), String(params.base64));
+  return { ok: true };
+});
+hostHandlers.set('host.fs.mkdir', async () => ({ ok: true }));
 hostHandlers.set('host.overlay.create', async () => ({ overlayId: 'overlay-1', width: 260, height: 190 }));
 hostHandlers.set('host.overlay.postMessage', async (params) => {
   calls.push({ overlay: params.payload });
@@ -118,7 +130,7 @@ hostHandlers.set('host.http.request', async (params) => {
     return {
       status: 200,
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ url: 'http://example.com/song.mp3', hash: url.searchParams.get('hash') }),
+      body: JSON.stringify({ url: 'http://127.0.0.1:' + audioPort + '/song.mp3', hash: url.searchParams.get('hash') }),
       truncated: false
     };
   }
@@ -278,6 +290,7 @@ function waitFor(predicate, timeoutMs = 3000) {
 }
 
 async function run() {
+  await audioReady;
   const failures = [];
   const boot = await invokeHandler('hooks.boot');
   if (!boot || boot.ok !== true) failures.push('hooks.boot 未成功');
@@ -571,9 +584,8 @@ async function run() {
   const playOk = await invokeHandler('ui.music.playUrl', { song: favSong });
   if (!playOk || playOk.ok !== true || !playOk.url) failures.push('登录后取播放地址失败: ' + JSON.stringify(playOk));
 
-  const openedSystem = calls.filter((c) => c.openUrl).pop();
-  if (!openedSystem) failures.push('http 音频应交由系统播放器打开');
-  if (playOk && playOk.player !== 'system') failures.push('http 音频应标记 player=system，实际 ' + playOk.player);
+  if (playOk && (!playOk.chunks || playOk.chunks.length === 0)) failures.push('播放未返回音频切片');
+  if (calls.some((c) => c.openUrl)) failures.push('不应再调用 openUrl（会跳浏览器）');
 
   const playReq = musicRequests.filter((r) => r.path === '/song/url').pop();
   if (!playReq) failures.push('未发出 /song/url 请求');
@@ -609,6 +621,7 @@ async function run() {
 
   child.stdin.end();
   child.kill();
+  audioServer.close();
 
   if (failures.length > 0) {
     console.error('FAIL');
@@ -620,7 +633,7 @@ async function run() {
   console.log(
     JSON.stringify(
       {
-        handlers: 49,
+        handlers: 52,
         hostCalls: calls.length,
         savedConfigName: saved.settings.petName,
         overlayOpenAfterHide: hidden.settings.pet.enabled,
@@ -635,5 +648,6 @@ async function run() {
 run().catch((error) => {
   console.error('ERROR', error);
   child.kill();
+  audioServer.close();
   process.exitCode = 1;
 });

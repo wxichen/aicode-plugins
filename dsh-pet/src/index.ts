@@ -17,6 +17,7 @@ import {
   loginWithPhone,
   MusicApiError,
   refreshSession,
+  downloadAudioChunks,
   fetchAccountPlaylists,
   fetchLyrics,
   fetchPlaylistSongs,
@@ -25,6 +26,7 @@ import {
   sendLoginCode
 } from './music';
 import { normalizeSession, type FavoriteList, type MusicSession, type SongItem } from './shared/music';
+import type { DownloadedAudio } from './music';
 import type { LyricLine } from './music';
 
 const CONFIG_PATH = 'data://config.json';
@@ -243,19 +245,6 @@ function listSummary(): Array<{ id: string; name: string; count: number; updated
   }));
 }
 
-/** 交给系统播放器：ACTION_VIEW 能绕开 WebView 的混合内容限制。 */
-async function openInSystemPlayer(url: string): Promise<{ ok: boolean; code: string; message: string }> {
-  try {
-    await hostCall('host.ui.openUrl', { url });
-    return { ok: true, code: '', message: '' };
-  } catch (error) {
-    const code = errorCode(error) ?? 'OPEN_URL_FAILED';
-    const message =
-      code === 'NO_ACTIVITY' ? '系统里没有能播放该音频的应用' : errorMessage(error);
-    return { ok: false, code, message };
-  }
-}
-
 /** 解析歌曲并返回可播放地址；未登录或受限时把原因带回调用方。 */
 async function playSong(
   song: { hash: string; albumId?: string; albumAudioId?: string }
@@ -299,31 +288,32 @@ async function singFromPool(songs: SongItem[]): Promise<Record<string, unknown>>
   }
 
   await publishState(settings.animations.action, '♪ ' + song.title + ' - ' + song.singer);
-  // http 音频在插件 WebView 里会被拦，改用系统播放器出声；
-  // 但歌词仍由浮层气泡展示，所以两种情况都要把歌词推给浮层。
-  const viaSystem = /^http:\/\//i.test(played.url);
   if (!overlayId) {
     const opened = await openPet();
     if (!opened.ok) {
       return { ok: false, code: opened.code || 'OVERLAY_FAILED', message: opened.message || '浮层不可用' };
     }
   }
-  if (viaSystem) {
-    const opened = await openInSystemPlayer(played.url);
-    if (!opened.ok) return { ok: false, code: opened.code, message: opened.message };
+  // 由进程下载切片，浮层读回拼 Blob 播放：不跳浏览器，也不受混合内容限制。
+  let audio: DownloadedAudio;
+  try {
+    audio = await downloadAudioChunks(song.hash, played.url);
+  } catch (error) {
+    return { ok: false, code: errorCode(error) || 'AUDIO_FAILED', message: errorMessage(error) };
   }
   await postOverlay({
     type: 'pet.sing',
-    // 系统播放时浮层拿不到音频进度：url 留空，按时间轴自行滚动歌词。
-    song: { title: song.title, singer: song.singer, cover: song.cover, url: viaSystem ? '' : played.url },
+    song: { title: song.title, singer: song.singer, cover: song.cover, url: '' },
     lyrics,
-    external: viaSystem
+    chunks: audio.chunks,
+    mimeType: audio.mimeType
   });
   return {
     ok: true,
     song: { title: song.title, singer: song.singer },
-    player: viaSystem ? 'system' : 'overlay',
-    lyrics: lyrics.length
+    player: 'overlay',
+    lyrics: lyrics.length,
+    chunks: audio.chunks.length
   };
 }
 
@@ -1094,24 +1084,23 @@ const handlers: Record<string, PluginHandler> = {
       albumAudioId: song.albumAudioId
     });
     if (!played.ok) return played;
-    // 音频 CDN 只给 http（强制 https 会证书不匹配），而插件 WebView 禁止混合内容，
-    // 所以 http 交给系统播放器（ACTION_VIEW），只有 https 才交给浮层播放。
-    if (/^http:\/\//i.test(played.url)) {
-      const opened = await openInSystemPlayer(played.url);
-      if (!opened.ok) return { ok: false, code: opened.code, message: opened.message, url: played.url };
-      return { ok: true, url: played.url, reason: '', code: '', player: 'system' };
+    // 一律由进程下载切片，页面读回拼 Blob 播放：
+    // 这样既不跳浏览器，也不受 WebView 混合内容限制。
+    try {
+      const audio = await downloadAudioChunks(song.hash, played.url);
+      return {
+        ok: true,
+        url: played.url,
+        reason: '',
+        code: '',
+        player: 'overlay',
+        chunks: audio.chunks,
+        mimeType: audio.mimeType,
+        totalBytes: audio.totalBytes
+      };
+    } catch (error) {
+      return { ok: false, code: errorCode(error) || 'AUDIO_FAILED', message: errorMessage(error), url: played.url };
     }
-    if (!overlayId) {
-      const opened = await openPet();
-      if (!opened.ok) {
-        return { ok: false, code: opened.code || 'OVERLAY_FAILED', message: opened.message || '桌宠浮层不可用' };
-      }
-    }
-    await postOverlay({
-      type: 'pet.sing',
-      song: { title: song.title ?? '', singer: song.singer ?? '', cover: song.cover ?? '', url: played.url }
-    });
-    return { ...played, player: 'overlay' };
   },
 
   // ---- 桌宠唱歌 ----
