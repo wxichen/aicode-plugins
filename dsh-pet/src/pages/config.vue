@@ -129,6 +129,10 @@
             <span class="music-meta">{{ song.singer }} · {{ song.album || '未知专辑' }}</span>
             <span class="music-detail">{{ formatMusicDuration(song.duration) }}<template v-if="song.bitrate"> · {{ song.bitrate }}kbps</template></span>
           </div>
+          <button class="music-play" type="button" :disabled="musicBusy" @click="playSongItem(song)">▶</button>
+          <button class="music-fav" type="button" :class="{ on: favoriteHashes.includes(song.hash) }" @click="toggleFavorite(song)">
+            {{ favoriteHashes.includes(song.hash) ? '★' : '☆' }}
+          </button>
         </div>
         <div class="music-pager">
           <aicode-button :disabled="musicLoading || musicPage <= 1" @click="searchMusic(musicPage - 1)">上一页</aicode-button>
@@ -143,6 +147,17 @@
       <p class="voice-hint">
         默认接口来自开源项目 kgka_Music_hl 的公开服务，可改为自建地址。
       </p>
+      <aicode-divider />
+      <button class="music-account-line" type="button" @click="openFavorites">
+        <span class="music-account-text">
+          <span class="music-account-title">收藏歌单</span>
+          <span class="music-account-sub">{{ favoriteSummaryText }}</span>
+        </span>
+        <span class="music-account-action">管理</span>
+      </button>
+      <div class="music-actions-row">
+        <aicode-button :disabled="musicBusy || favoriteTotalCount === 0" @click="singFromPet">让桌宠唱一首</aicode-button>
+      </div>
     </aicode-group>
 
     <aicode-group title="互动与快捷操作">
@@ -210,6 +225,39 @@
         </template>
       </template>
       <p v-if="musicLoginHint" class="voice-hint">{{ musicLoginHint }}</p>
+    </aicode-dialog>
+
+    <aicode-dialog v-model="favoritesOpen" title="收藏歌单" @confirm="favoritesOpen = false">
+      <div class="music-tabs">
+        <button
+          v-for="list in favoriteLists"
+          :key="list.id"
+          class="music-tab"
+          :class="{ active: currentListId === list.id }"
+          type="button"
+          @click="selectList(list.id)"
+        >
+          {{ list.name }}（{{ list.count }}）
+        </button>
+      </div>
+      <div class="music-dialog-actions">
+        <aicode-button :disabled="musicBusy" @click="createFavoriteList">新建歌单</aicode-button>
+        <aicode-button v-if="currentListId" :disabled="musicBusy" @click="removeCurrentList">删除歌单</aicode-button>
+      </div>
+      <p v-if="favoriteHint" class="voice-hint">{{ favoriteHint }}</p>
+      <div v-if="favoriteSongs.length" class="music-results">
+        <div v-for="song in favoriteSongs" :key="song.hash" class="music-item">
+          <img v-if="song.cover" class="music-cover" :src="song.cover" alt="" loading="lazy" />
+          <div v-else class="music-cover music-cover-empty"></div>
+          <div class="music-main">
+            <span class="music-title">{{ song.title }}</span>
+            <span class="music-meta">{{ song.singer }} · {{ song.album || '未知专辑' }}</span>
+          </div>
+          <button class="music-play" type="button" :disabled="musicBusy" @click="playSongItem(song)">▶</button>
+          <button class="music-fav on" type="button" @click="removeFavoriteSong(song)">★</button>
+        </div>
+      </div>
+      <p v-else class="voice-hint">这个歌单还没有歌，去搜索里点 ☆ 收藏。</p>
     </aicode-dialog>
 
     <aicode-dialog v-model="confirmOpen" title="恢复默认设置" message="会重置所有外观、人设和通知选项，桌宠浮层也会按默认配置重新创建。" @confirm="reset" />
@@ -1027,6 +1075,171 @@ async function logoutMusic(): Promise<void> {
   }
 }
 
+// ---- 收藏歌单 ----
+
+interface FavoriteSummary {
+  id: string;
+  name: string;
+  count: number;
+  updatedAt: number;
+}
+
+const favoriteLists = ref<FavoriteSummary[]>([]);
+const favoriteHashes = ref<string[]>([]);
+const favoriteSongs = ref<MusicSong[]>([]);
+const currentListId = ref('');
+const favoritesOpen = ref(false);
+const favoriteHint = ref('');
+
+const favoriteTotalCount = computed(() => favoriteLists.value.reduce((sum, list) => sum + list.count, 0));
+const favoriteSummaryText = computed(() => {
+  if (favoriteLists.value.length === 0) return '还没有歌单';
+  return favoriteLists.value.map((list) => list.name + ' ' + list.count).join(' · ');
+});
+
+async function refreshFavorites(): Promise<void> {
+  try {
+    const [lists, hashes] = await Promise.all([
+      aicode.invoke<{ lists?: FavoriteSummary[] }>('ui.music.favorites'),
+      aicode.invoke<{ hashes?: string[] }>('ui.music.favoriteHashes')
+    ]);
+    favoriteLists.value = lists?.lists ?? [];
+    favoriteHashes.value = hashes?.hashes ?? [];
+    if (!currentListId.value && favoriteLists.value.length > 0) {
+      currentListId.value = favoriteLists.value[0].id;
+    }
+  } catch (error) {
+    favoriteHint.value = '读取收藏失败：' + (error as Error).message;
+  }
+}
+
+async function loadListSongs(id: string): Promise<void> {
+  if (!id) {
+    favoriteSongs.value = [];
+    return;
+  }
+  try {
+    const result = await aicode.invoke<{ ok?: boolean; list?: { songs?: MusicSong[] }; message?: string }>(
+      'ui.music.favoriteList',
+      { id }
+    );
+    if (result?.ok === true) favoriteSongs.value = result.list?.songs ?? [];
+    else favoriteHint.value = result?.message || '读取歌单失败';
+  } catch (error) {
+    favoriteHint.value = '读取歌单失败：' + (error as Error).message;
+  }
+}
+
+async function toggleFavorite(song: MusicSong): Promise<void> {
+  const isFav = favoriteHashes.value.includes(song.hash);
+  try {
+    const result = await aicode.invoke<{ ok?: boolean; message?: string }>('ui.music.toggleFavorite', {
+      song,
+      listId: currentListId.value,
+      remove: isFav
+    });
+    if (result?.ok !== true) {
+      musicHint.value = result?.message || '收藏失败';
+      return;
+    }
+    await refreshFavorites();
+    await loadListSongs(currentListId.value);
+    musicHint.value = isFav ? '已取消收藏' : '已加入收藏';
+  } catch (error) {
+    musicHint.value = '收藏失败：' + (error as Error).message;
+  }
+}
+
+async function openFavorites(): Promise<void> {
+  favoritesOpen.value = true;
+  favoriteHint.value = '';
+  await refreshFavorites();
+  if (!currentListId.value && favoriteLists.value.length === 0) {
+    await createFavoriteList();
+    return;
+  }
+  await loadListSongs(currentListId.value);
+}
+
+async function selectList(id: string): Promise<void> {
+  currentListId.value = id;
+  await loadListSongs(id);
+}
+
+async function createFavoriteList(): Promise<void> {
+  try {
+    const result = await aicode.invoke<{ ok?: boolean; list?: { id: string } }>('ui.music.createList', {
+      name: '收藏 ' + (favoriteLists.value.length + 1)
+    });
+    if (result?.ok === true && result.list) {
+      currentListId.value = result.list.id;
+      await refreshFavorites();
+      await loadListSongs(currentListId.value);
+    }
+  } catch (error) {
+    favoriteHint.value = '新建失败：' + (error as Error).message;
+  }
+}
+
+async function removeCurrentList(): Promise<void> {
+  if (!currentListId.value) return;
+  try {
+    await aicode.invoke('ui.music.deleteList', { id: currentListId.value });
+    currentListId.value = '';
+    favoriteSongs.value = [];
+    await refreshFavorites();
+    await loadListSongs(currentListId.value);
+  } catch (error) {
+    favoriteHint.value = '删除失败：' + (error as Error).message;
+  }
+}
+
+async function removeFavoriteSong(song: MusicSong): Promise<void> {
+  try {
+    await aicode.invoke('ui.music.removeSong', { listId: currentListId.value, hash: song.hash });
+    await refreshFavorites();
+    await loadListSongs(currentListId.value);
+  } catch (error) {
+    favoriteHint.value = '移除失败：' + (error as Error).message;
+  }
+}
+
+/** 让桌宠随机唱一首收藏里的歌。 */
+async function singFromPet(): Promise<void> {
+  musicBusy.value = true;
+  try {
+    const result = await aicode.invoke<{ ok?: boolean; message?: string; song?: { title: string } }>(
+      'ui.pet.sing',
+      { listId: currentListId.value }
+    );
+    musicHint.value = result?.ok === true ? '桌宠正在唱：' + (result.song?.title ?? '') : result?.message || '唱歌失败';
+  } catch (error) {
+    musicHint.value = '唱歌失败：' + (error as Error).message;
+  } finally {
+    musicBusy.value = false;
+  }
+}
+
+/** 点搜索结果里的播放：先取地址，再交给桌宠浮层播放。 */
+async function playSongItem(song: MusicSong): Promise<void> {
+  musicBusy.value = true;
+  try {
+    const result = await aicode.invoke<{ ok?: boolean; url?: string; reason?: string; code?: string }>(
+      'ui.music.playUrl',
+      { song }
+    );
+    if (result?.ok !== true || !result.url) {
+      musicHint.value = result?.reason || '无法播放';
+      return;
+    }
+    musicHint.value = '正在播放：' + song.title;
+  } catch (error) {
+    musicHint.value = '播放失败：' + (error as Error).message;
+  } finally {
+    musicBusy.value = false;
+  }
+}
+
 onMounted(async () => {
   offEvents = aicode.events.on((event: AicodeEvent) => {
     if (event.name === 'pet.state' && event.payload && typeof event.payload === 'object') {
@@ -1040,6 +1253,7 @@ onMounted(async () => {
   await loadTtsState();
   await loadMusicSettings();
   await refreshMusicAccount();
+  await refreshFavorites();
 });
 
 onBeforeUnmount(() => {
@@ -1126,6 +1340,48 @@ onBeforeUnmount(() => {
 input[type='range'] {
   width: 100%;
   accent-color: var(--aicode-primary);
+}
+
+.music-play {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--aicode-surface-variant);
+  color: var(--aicode-on-surface);
+  font-size: 13px;
+  line-height: 34px;
+  cursor: pointer;
+}
+
+.music-play:disabled {
+  opacity: 0.5;
+}
+
+.music-fav {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--aicode-on-surface-variant);
+  font-size: 18px;
+  line-height: 34px;
+  cursor: pointer;
+}
+
+.music-fav.on {
+  color: #f0a020;
+}
+
+.music-actions-row {
+  display: flex;
+  gap: 8px;
+  padding: 0 16px 12px;
 }
 
 .music-search {

@@ -77,7 +77,8 @@ hostHandlers.set('host.http.request', async (params) => {
         Bitrate: 128,
         Image: 'http://example.com/c.jpg',
         ExtName: 'mp3',
-        AlbumID: '1'
+        AlbumID: '1',
+        MixSongID: '32100650'
       },
       { FileName: '缺少 hash 的条目' }
     ]);
@@ -103,6 +104,23 @@ hostHandlers.set('host.http.request', async (params) => {
       );
     }
     return json(400, { message: '验证码错误' });
+  }
+  if (url.pathname === '/song/url') {
+    // 未登录时真实服务返回 400 + 20028；这里按是否有会话头区分。
+    if (!params.headers || !params.headers['X-Kg-Session-Id']) {
+      return {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url: null, errcode: 20028, error: '本次请求需要验证' }),
+        truncated: false
+      };
+    }
+    return {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: 'https://example.com/song.mp3', hash: url.searchParams.get('hash') }),
+      truncated: false
+    };
   }
   if (url.pathname === '/login/qr/key') {
     return json(200, { qrcode: 'QR-KEY-1', qrcode_img: 'data:image/png;base64,AAAA' });
@@ -479,6 +497,95 @@ async function run() {
   const afterLogout = await invokeHandler('ui.music.account');
   if (afterLogout && afterLogout.signedIn !== false) failures.push('退出后音乐账号状态未清空');
 
+  // ---- 封面 https 化 ----
+
+  const coverSong = (musicSearch.songs && musicSearch.songs[0]) || null;
+  if (coverSong) {
+    if (!String(coverSong.cover).startsWith('https://')) {
+      failures.push('封面未升级为 https（CSP 只允许 https）: ' + coverSong.cover);
+    }
+    if (!coverSong.albumAudioId) failures.push('未映射 albumAudioId（播放需要 MixSongID）');
+  }
+
+  // ---- 收藏歌单 ----
+
+  const created = await invokeHandler('ui.music.createList', { name: '测试歌单' });
+  if (!created || created.ok !== true || !created.list) failures.push('新建歌单失败');
+  const listId = created && created.list ? created.list.id : '';
+
+  const favSong = {
+    hash: 'HASH-1',
+    title: '晴天',
+    singer: '周杰伦',
+    album: '叶惠美',
+    duration: 269,
+    cover: 'https://example.com/c.jpg',
+    fileName: '',
+    bitrate: 128,
+    fileSize: 0,
+    extName: 'mp3',
+    albumId: '966846',
+    albumAudioId: '32100650'
+  };
+  const added = await invokeHandler('ui.music.toggleFavorite', { song: favSong, listId });
+  if (!added || added.ok !== true || added.favorited !== true) failures.push('收藏歌曲失败');
+
+  const again = await invokeHandler('ui.music.toggleFavorite', { song: favSong, listId });
+  if (!again || again.ok !== true) failures.push('重复收藏应成功');
+
+  const listDetail = await invokeHandler('ui.music.favoriteList', { id: listId });
+  if (!listDetail || !listDetail.list || listDetail.list.songs.length !== 1) {
+    failures.push('重复收藏应只保留一条，实际 ' + (listDetail && listDetail.list ? listDetail.list.songs.length : 'n/a'));
+  }
+
+  const hashes = await invokeHandler('ui.music.favoriteHashes');
+  if (!hashes || !hashes.hashes.includes('HASH-1')) failures.push('收藏 hash 列表缺少歌曲');
+
+  if (!files.get('data://music-favorites.json')) failures.push('收藏未落盘');
+
+  // ---- 播放：未登录应给出明确原因，登录后能拿到地址 ----
+
+  await invokeHandler('ui.music.logout');
+  const noSessionPlay = await invokeHandler('ui.music.playUrl', { song: favSong });
+  if (!noSessionPlay || noSessionPlay.ok !== false) failures.push('未登录播放应失败');
+  if (noSessionPlay && noSessionPlay.code !== 'NO_SESSION') {
+    failures.push('未登录播放应返回 NO_SESSION，实际 ' + noSessionPlay.code);
+  }
+
+  const phoneLogin2 = await invokeHandler('ui.music.loginPhone', { mobile: '13800000000', code: '123456' });
+  if (!phoneLogin2 || phoneLogin2.ok !== true) failures.push('播放测试前登录失败');
+
+  const playOk = await invokeHandler('ui.music.playUrl', { song: favSong });
+  if (!playOk || playOk.ok !== true || !playOk.url) failures.push('登录后取播放地址失败: ' + JSON.stringify(playOk));
+
+  const playReq = musicRequests.filter((r) => r.path === '/song/url').pop();
+  if (!playReq) failures.push('未发出 /song/url 请求');
+  else if (!playReq.query.includes('album_audio_id=32100650')) {
+    failures.push('/song/url 未带数字 album_audio_id');
+  }
+
+  // ---- 桌宠唱歌 ----
+
+  const sing = await invokeHandler('ui.pet.sing', { listId });
+  if (!sing || sing.ok !== true) failures.push('桌宠唱歌失败: ' + JSON.stringify(sing));
+
+  const singStop = await invokeHandler('overlay.message', {
+    overlayId: 'overlay-1',
+    payload: { type: 'pet.stopSing' }
+  });
+  if (!singStop || singStop.ok !== true) failures.push('停止唱歌失败');
+
+  const removed = await invokeHandler('ui.music.toggleFavorite', { song: favSong, listId, remove: true });
+  if (!removed || removed.favorited !== false) failures.push('取消收藏失败');
+
+  const afterRemove = await invokeHandler('ui.music.favoriteList', { id: listId });
+  if (!afterRemove || afterRemove.list.songs.length !== 0) failures.push('取消收藏后歌单未清空');
+
+  const emptySing = await invokeHandler('ui.pet.sing', { listId });
+  if (!emptySing || emptySing.ok !== false || emptySing.code !== 'EMPTY_FAVORITES') {
+    failures.push('空收藏时唱歌应提示 EMPTY_FAVORITES');
+  }
+
   child.stdin.end();
   child.kill();
 
@@ -492,7 +599,7 @@ async function run() {
   console.log(
     JSON.stringify(
       {
-        handlers: 38,
+        handlers: 49,
         hostCalls: calls.length,
         savedConfigName: saved.settings.petName,
         overlayOpenAfterHide: hidden.settings.pet.enabled,

@@ -6,7 +6,7 @@
     "default": "DSH Pet",
     "zh-CN": "AiCode 桌宠"
   },
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "wxichen",
   "repository": "https://github.com/wxichen/aicode-plugins",
   "description": {
@@ -178,6 +178,19 @@
         },
         "inputSchema": "schemas/music-account.input.json",
         "handler": "tools.musicAccount"
+      },
+      {
+        "id": "sing",
+        "title": {
+          "default": "Pet Sings",
+          "zh-CN": "让桌宠唱歌"
+        },
+        "description": {
+          "default": "Pick a random song from the favorites and play it on the floating pet.",
+          "zh-CN": "从收藏歌单里随机挑一首歌，由桌宠悬浮窗播放。"
+        },
+        "inputSchema": "schemas/sing.input.json",
+        "handler": "tools.sing"
       }
     ]
   }

@@ -109,6 +109,14 @@ function pickNumber(input: Record<string, unknown>, keys: string[]): number {
   return 0;
 }
 
+/** 封面统一为 https：插件页 CSP 的 img-src 只允许 https，http 图片会被静默拦截。 */
+function normalizeCover(raw: string): string {
+  if (!raw) return '';
+  if (raw.startsWith('//')) return 'https:' + raw;
+  if (/^http:\/\//i.test(raw)) return raw.replace(/^http:\/\//i, 'https://');
+  return raw;
+}
+
 /** 把接口返回的歌曲对象映射成稳定结构，字段名兼容几种写法。 */
 export function mapSong(raw: unknown): SongItem | null {
   const input = asRecord(raw);
@@ -123,12 +131,13 @@ export function mapSong(raw: unknown): SongItem | null {
     singer: singer || '未知歌手',
     album: pickString(input, ['AlbumName', 'albumName', 'album']),
     duration: pickNumber(input, ['Duration', 'duration', 'timelength']),
-    cover: pickString(input, ['Image', 'image', 'AlbumImage', 'img']),
+    cover: normalizeCover(pickString(input, ['Image', 'image', 'AlbumImage', 'img'])),
     fileName,
     bitrate: pickNumber(input, ['Bitrate', 'bitrate']),
     fileSize: pickNumber(input, ['FileSize', 'fileSize', 'size']),
     extName: pickString(input, ['ExtName', 'extName', 'extname']),
-    albumId: pickString(input, ['AlbumID', 'albumId', 'album_id'])
+    albumId: pickString(input, ['AlbumID', 'albumId', 'album_id']),
+    albumAudioId: pickString(input, ['MixSongID', 'mixSongId', 'album_audio_id', 'albumAudioId'])
   };
 }
 
@@ -258,4 +267,36 @@ function sessionFromPayload(
     avatarUrl: pickString(payload, ['pic', 'avatar']) || previous?.avatarUrl || '',
     savedAt: Date.now()
   };
+}
+
+/**
+ * 解析播放地址。
+ *
+ * 实测：未登录时服务端对所有歌曲都返回 400 + errcode 20028「本次请求需要验证」，
+ * 所以播放必须先登录；付费/受限歌曲登录后也可能拿不到 url，这里把原因原样带回。
+ */
+export async function resolvePlayUrl(
+  settings: MusicSettings,
+  session: MusicSession | null,
+  song: { hash: string; albumId?: string; albumAudioId?: string }
+): Promise<{ url: string; reason: string }> {
+  if (!song.hash) return { url: '', reason: '缺少歌曲 hash' };
+  if (!session) return { url: '', reason: '未登录：播放地址需要登录后才能获取' };
+  const query: Record<string, unknown> = {
+    hash: song.hash,
+    quality: 'standard',
+    free_part: false
+  };
+  // album_audio_id 必须是数字，否则服务端解析失败返回空地址。
+  if (song.albumAudioId && /^\d+$/.test(song.albumAudioId)) query.album_audio_id = song.albumAudioId;
+  if (song.albumId && /^\d+$/.test(song.albumId)) query.album_id = song.albumId;
+
+  const { payload } = await request(settings, session, 'song/url', query);
+  const obj = asRecord(payload);
+  const data = Array.isArray(obj.data) ? asRecord(obj.data[0]) : asRecord(obj.data);
+  const url = pickString(obj, ['url']) || pickString(data, ['url']);
+  if (url) return { url, reason: '' };
+  const reason = pickString(obj, ['error', 'message']) || pickString(data, ['error', 'message']);
+  const errcode = pickNumber(obj, ['errcode', 'err_code']);
+  return { url: '', reason: reason || (errcode ? `服务端拒绝（errcode=${errcode}）` : '未获取到播放地址') };
 }

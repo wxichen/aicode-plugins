@@ -31,6 +31,23 @@ export interface SongItem {
   fileSize: number;
   extName: string;
   albumId: string;
+  /** /song/url 需要的数字音频 ID（接口返回 MixSongID）。 */
+  albumAudioId: string;
+}
+
+export interface FavoriteList {
+  id: string;
+  name: string;
+  songs: SongItem[];
+  updatedAt: number;
+}
+
+export interface PlayUrlResult {
+  ok: boolean;
+  url: string;
+  /** 未登录或付费歌曲时的原因 */
+  reason: string;
+  code: string;
 }
 
 export interface SearchResult {

@@ -17,14 +17,16 @@ import {
   loginWithPhone,
   MusicApiError,
   refreshSession,
+  resolvePlayUrl,
   searchSongs,
   sendLoginCode
 } from './music';
-import { normalizeSession, type MusicSession } from './shared/music';
+import { normalizeSession, type FavoriteList, type MusicSession, type SongItem } from './shared/music';
 
 const CONFIG_PATH = 'data://config.json';
 const STATE_PATH = 'data://state.json';
 const MUSIC_SESSION_PATH = 'data://music-session.json';
+const MUSIC_FAVORITES_PATH = 'data://music-favorites.json';
 const PET_SURFACE = 'pet';
 const CREATE_WIDTH = 200;
 const CREATE_HEIGHT = 200;
@@ -125,6 +127,7 @@ function load(): Promise<void> {
       await loadSettings();
       await loadState();
       await loadMusicSession();
+      await loadFavorites();
       loaded = true;
     })().finally(() => {
       loadPromise = null;
@@ -180,6 +183,101 @@ function musicErrorCode(error: unknown): string {
     if (typeof code === 'string' && code) return code;
   }
   return 'MUSIC_ERROR';
+}
+
+let favoriteLists: FavoriteList[] = [];
+
+async function loadFavorites(): Promise<void> {
+  try {
+    const file = await hostCall<{ content?: unknown }>('host.fs.read', { path: MUSIC_FAVORITES_PATH });
+    const raw = typeof file?.content === 'string' ? JSON.parse(file.content) : null;
+    favoriteLists = Array.isArray(raw)
+      ? raw
+          .filter((item): item is FavoriteList => Boolean(item) && typeof item === 'object')
+          .map((item) => ({
+            id: String(item.id ?? ''),
+            name: String(item.name ?? '未命名歌单'),
+            songs: Array.isArray(item.songs) ? item.songs : [],
+            updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now()
+          }))
+          .filter((item) => item.id)
+      : [];
+  } catch {
+    favoriteLists = [];
+  }
+}
+
+async function persistFavorites(): Promise<void> {
+  await hostCall('host.fs.write', {
+    path: MUSIC_FAVORITES_PATH,
+    content: JSON.stringify(favoriteLists, null, 2)
+  });
+}
+
+function newListId(): string {
+  return 'list-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1000).toString(36);
+}
+
+function findList(id: string): FavoriteList | undefined {
+  return favoriteLists.find((list) => list.id === id);
+}
+
+/** 同一 hash 只存一份，重复收藏时更新元信息。 */
+function upsertSong(list: FavoriteList, song: SongItem): void {
+  const index = list.songs.findIndex((item) => item.hash === song.hash);
+  if (index >= 0) list.songs[index] = song;
+  else list.songs.push(song);
+  list.updatedAt = Date.now();
+}
+
+function listSummary(): Array<{ id: string; name: string; count: number; updatedAt: number }> {
+  return favoriteLists.map((list) => ({
+    id: list.id,
+    name: list.name,
+    count: list.songs.length,
+    updatedAt: list.updatedAt
+  }));
+}
+
+/** 解析歌曲并返回可播放地址；未登录或受限时把原因带回调用方。 */
+async function playSong(
+  song: { hash: string; albumId?: string; albumAudioId?: string }
+): Promise<{ ok: boolean; url: string; reason: string; code: string }> {
+  if (!musicSession) {
+    return { ok: false, url: '', reason: '未登录：播放地址需要登录后才能获取', code: 'NO_SESSION' };
+  }
+  try {
+    const result = await resolvePlayUrl(settings.music, musicSession, song);
+    if (!result.url) {
+      return { ok: false, url: '', reason: result.reason || '未获取到播放地址', code: 'NO_URL' };
+    }
+    return { ok: true, url: result.url, reason: '', code: '' };
+  } catch (error) {
+    return { ok: false, url: '', reason: errorMessage(error), code: musicErrorCode(error) };
+  }
+}
+
+/** 桌宠“唱歌”：从收藏歌单选一首，推给浮层播放。 */
+async function singFromFavorites(listId?: string): Promise<Record<string, unknown>> {
+  await load();
+  const pool = listId ? findList(listId)?.songs ?? [] : favoriteLists.flatMap((list) => list.songs);
+  if (pool.length === 0) {
+    return { ok: false, code: 'EMPTY_FAVORITES', message: '收藏歌单还是空的，先收藏几首歌吧' };
+  }
+  const song = pool[Math.floor(Math.random() * pool.length)];
+  const played = await playSong(song);
+  if (!played.ok) return { ok: false, code: played.code, message: played.reason };
+
+  if (!overlayId) {
+    const opened = await openPet();
+    if (!opened.ok) return { ok: false, code: opened.code || 'OVERLAY_FAILED', message: opened.message || '浮层不可用' };
+  }
+  await publishState(settings.animations.action, '♪ ' + song.title + ' - ' + song.singer);
+  await postOverlay({
+    type: 'pet.sing',
+    song: { title: song.title, singer: song.singer, cover: song.cover, url: played.url }
+  });
+  return { ok: true, song: { title: song.title, singer: song.singer } };
 }
 
 async function ensureOverlay(): Promise<string> {
@@ -550,6 +648,13 @@ const handlers: Record<string, PluginHandler> = {
       await closeOverlay();
       return { ok: true };
     }
+    if (type === 'pet.sing') {
+      return singFromFavorites(readString(payload, 'listId') || undefined);
+    }
+    if (type === 'pet.stopSing') {
+      await postOverlay({ type: 'pet.singStop' });
+      return { ok: true };
+    }
     if (type === 'pet.refresh') {
       await publishSettings();
       await publishState(state.lastAnimation ?? settings.animations.idle, state.lastText);
@@ -817,6 +922,133 @@ const handlers: Record<string, PluginHandler> = {
         duration: song.duration
       }))
     };
+  },
+
+  // ---- 收藏歌单 ----
+
+  'ui.music.favorites': async () => {
+    await load();
+    return { lists: listSummary() };
+  },
+
+  'ui.music.favoriteList': async (args: PluginArgs) => {
+    await load();
+    const id = readString(args, 'id');
+    const list = findList(id);
+    if (!list) return { ok: false, code: 'NOT_FOUND', message: '歌单不存在' };
+    return { ok: true, list };
+  },
+
+  'ui.music.createList': async (args: PluginArgs) => {
+    await load();
+    const name = readString(args, 'name') || '我的收藏';
+    const list: FavoriteList = { id: newListId(), name, songs: [], updatedAt: Date.now() };
+    favoriteLists.push(list);
+    await persistFavorites();
+    return { ok: true, list, lists: listSummary() };
+  },
+
+  'ui.music.renameList': async (args: PluginArgs) => {
+    await load();
+    const list = findList(readString(args, 'id'));
+    if (!list) return { ok: false, code: 'NOT_FOUND', message: '歌单不存在' };
+    list.name = readString(args, 'name') || list.name;
+    list.updatedAt = Date.now();
+    await persistFavorites();
+    return { ok: true, lists: listSummary() };
+  },
+
+  'ui.music.deleteList': async (args: PluginArgs) => {
+    await load();
+    const id = readString(args, 'id');
+    favoriteLists = favoriteLists.filter((list) => list.id !== id);
+    await persistFavorites();
+    return { ok: true, lists: listSummary() };
+  },
+
+  'ui.music.toggleFavorite': async (args: PluginArgs) => {
+    await load();
+    const song = args.song as SongItem | undefined;
+    if (!song || !song.hash) return { ok: false, code: 'PARAM_INVALID', message: '缺少歌曲信息' };
+    let listId = readString(args, 'listId');
+    if (!listId) {
+      if (favoriteLists.length === 0) {
+        favoriteLists.push({ id: newListId(), name: '我的收藏', songs: [], updatedAt: Date.now() });
+      }
+      listId = favoriteLists[0].id;
+    }
+    const list = findList(listId);
+    if (!list) return { ok: false, code: 'NOT_FOUND', message: '歌单不存在' };
+    const exists = list.songs.some((item) => item.hash === song.hash);
+    if (exists && args.remove === true) {
+      list.songs = list.songs.filter((item) => item.hash !== song.hash);
+      list.updatedAt = Date.now();
+      await persistFavorites();
+      return { ok: true, favorited: false, listId, lists: listSummary() };
+    }
+    upsertSong(list, song);
+    await persistFavorites();
+    return { ok: true, favorited: true, listId, lists: listSummary() };
+  },
+
+  'ui.music.removeSong': async (args: PluginArgs) => {
+    await load();
+    const list = findList(readString(args, 'listId'));
+    const hash = readString(args, 'hash');
+    if (!list) return { ok: false, code: 'NOT_FOUND', message: '歌单不存在' };
+    list.songs = list.songs.filter((item) => item.hash !== hash);
+    list.updatedAt = Date.now();
+    await persistFavorites();
+    return { ok: true, list };
+  },
+
+  /** 哪些歌已收藏（刷新列表时标记心形）。 */
+  'ui.music.favoriteHashes': async () => {
+    await load();
+    const hashes = new Set<string>();
+    for (const list of favoriteLists) for (const song of list.songs) hashes.add(song.hash);
+    return { hashes: [...hashes] };
+  },
+
+  // ---- 播放 ----
+
+  'ui.music.playUrl': async (args: PluginArgs) => {
+    await load();
+    const song = args.song as
+      | { hash?: string; albumId?: string; albumAudioId?: string; title?: string; singer?: string; cover?: string }
+      | undefined;
+    if (!song || !song.hash) return { ok: false, code: 'PARAM_INVALID', message: '缺少歌曲 hash' };
+    const played = await playSong({
+      hash: song.hash,
+      albumId: song.albumId,
+      albumAudioId: song.albumAudioId
+    });
+    if (!played.ok) return played;
+    // 播放在浮层里进行：页面只负责取地址，避免两条音轨同时响。
+    if (!overlayId) {
+      const opened = await openPet();
+      if (!opened.ok) {
+        return { ok: false, code: opened.code || 'OVERLAY_FAILED', message: opened.message || '桌宠浮层不可用' };
+      }
+    }
+    await postOverlay({
+      type: 'pet.sing',
+      song: { title: song.title ?? '', singer: song.singer ?? '', cover: song.cover ?? '', url: played.url }
+    });
+    return played;
+  },
+
+  // ---- 桌宠唱歌 ----
+
+  'ui.pet.sing': async (args: PluginArgs) => {
+    const result = await singFromFavorites(readString(args, 'listId') || undefined);
+    return result;
+  },
+
+  'tools.sing': async (args: PluginArgs) => {
+    const result = await singFromFavorites(readString(args, 'listId') || undefined);
+    if (result.ok !== true) throw new Error(String(result.message || '唱歌失败'));
+    return result;
   },
 
   'tools.musicAccount': async () => {

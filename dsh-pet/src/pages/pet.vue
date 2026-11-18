@@ -44,6 +44,7 @@
     <div v-if="menuOpen" class="menu" :style="menuStyle">
       <button type="button" @click="doInteract('headpat')">摸头</button>
       <button type="button" @click="doInteract('feed')">喂食</button>
+      <button type="button" @click="doSing">{{ singing ? '停唱' : '唱歌' }}</button>
       <button type="button" @click="toggleSleep">{{ state.sleeping ? '起床' : '睡觉' }}</button>
       <button type="button" @click="showSettingsTip">设置</button>
       <button type="button" class="hide" @click="hidePet">隐藏</button>
@@ -282,6 +283,49 @@ function playSpeech(audio: SpeechAudio | null): void {
   });
 }
 
+let songEl: HTMLAudioElement | null = null;
+const singing = ref(false);
+
+/** 播放桌宠唱的歌曲；与朗读共用一套 Audio 元素，避免两条音轨同时响。 */
+function playSong(song: { url?: string; title?: string } | null): void {
+  if (!song?.url) return;
+  if (!songEl) {
+    songEl = new Audio();
+    songEl.preload = 'auto';
+    songEl.addEventListener('ended', () => {
+      singing.value = false;
+    });
+    songEl.addEventListener('error', () => {
+      singing.value = false;
+    });
+  }
+  speechEl?.pause();
+  songEl.src = song.url;
+  singing.value = true;
+  void songEl.play().catch(() => {
+    singing.value = false;
+    showBubble('这首唱不了，换一首吧。');
+  });
+}
+
+function stopSong(): void {
+  if (songEl) {
+    songEl.pause();
+    songEl.currentTime = 0;
+  }
+  singing.value = false;
+}
+
+async function doSing(): Promise<void> {
+  closeMenu();
+  if (singing.value) {
+    request('pet.stopSing');
+    stopSong();
+    return;
+  }
+  request('pet.sing');
+}
+
 /** 点击音效用 WebAudio 现场合成，包内没有音频素材，也避免额外解码开销。 */
 function playClickSound(): void {
   if (!settings.value.pet.clickSound) return;
@@ -398,6 +442,10 @@ function onMessage(raw: OverlayMessage): void {
     applyState(message.state as PetState);
   } else if (message.type === 'pet.speech') {
     playSpeech(message.audio as SpeechAudio | null);
+  } else if (message.type === 'pet.sing') {
+    playSong(message.song as { url?: string; title?: string } | null);
+  } else if (message.type === 'pet.singStop') {
+    stopSong();
   } else if (message.type === 'click') {
     void closeMenu();
     if (state.value.sleeping) {
@@ -488,6 +536,8 @@ onBeforeUnmount(() => {
   audioCtx = null;
   videoA.value?.pause();
   videoB.value?.pause();
+  stopSong();
+  songEl = null;
   videoA.value?.removeAttribute('src');
   videoB.value?.removeAttribute('src');
 });

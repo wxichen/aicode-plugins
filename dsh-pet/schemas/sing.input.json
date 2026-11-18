@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "properties": {
+    "listId": {
+      "type": "string",
+      "description": "指定收藏歌单 ID；省略时从所有收藏里随机挑一首"
+    }
+  },
+  "additionalProperties": false
+}
