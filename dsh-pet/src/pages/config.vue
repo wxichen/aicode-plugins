@@ -148,6 +148,13 @@
         默认接口来自开源项目 kgka_Music_hl 的公开服务，可改为自建地址。
       </p>
       <aicode-divider />
+      <button class="music-account-line" type="button" @click="openAccountPlaylists">
+        <span class="music-account-text">
+          <span class="music-account-title">我的歌单（账号）</span>
+          <span class="music-account-sub">{{ accountPlaylistSub }}</span>
+        </span>
+        <span class="music-account-action">查看</span>
+      </button>
       <button class="music-account-line" type="button" @click="openFavorites">
         <span class="music-account-text">
           <span class="music-account-title">收藏歌单</span>
@@ -225,6 +232,58 @@
         </template>
       </template>
       <p v-if="musicLoginHint" class="voice-hint">{{ musicLoginHint }}</p>
+    </aicode-dialog>
+
+    <aicode-dialog v-model="accountListsOpen" title="我的歌单" @confirm="accountListsOpen = false">
+      <template v-if="!musicAccount">
+        <p class="voice-hint">未登录：账号歌单需要先登录才能读取。</p>
+      </template>
+      <template v-else>
+        <p v-if="accountListHint" class="voice-hint">{{ accountListHint }}</p>
+        <div v-if="accountPlaylists.length" class="music-results">
+          <button
+            v-for="list in accountPlaylists"
+            :key="list.id"
+            class="music-account-line"
+            type="button"
+            @click="openAccountPlaylist(list)"
+          >
+            <img v-if="list.cover" class="music-cover" :src="list.cover" alt="" loading="lazy" />
+            <div v-else class="music-cover music-cover-empty"></div>
+            <span class="music-account-text">
+              <span class="music-account-title">{{ list.name }}</span>
+              <span class="music-account-sub">{{ list.songCount }} 首{{ list.isDefault ? ' · 我喜欢' : '' }}</span>
+            </span>
+            <span class="music-account-action">›</span>
+          </button>
+        </div>
+        <p v-else class="voice-hint">账号里没有读到歌单。若刚登录，先刷新一次。</p>
+        <div class="music-dialog-actions">
+          <aicode-button :disabled="musicBusy" @click="loadAccountPlaylists">刷新</aicode-button>
+        </div>
+      </template>
+    </aicode-dialog>
+
+    <aicode-dialog v-model="accountSongsOpen" :title="currentAccountList ? currentAccountList.name : '歌单'" @confirm="accountSongsOpen = false">
+      <p v-if="accountSongHint" class="voice-hint">{{ accountSongHint }}</p>
+      <div v-if="accountSongs.length" class="music-results">
+        <div v-for="song in accountSongs" :key="song.hash" class="music-item">
+          <img v-if="song.cover" class="music-cover" :src="song.cover" alt="" loading="lazy" />
+          <div v-else class="music-cover music-cover-empty"></div>
+          <div class="music-main">
+            <span class="music-title">{{ song.title }}</span>
+            <span class="music-meta">{{ song.singer }} · {{ song.album || '未知专辑' }}</span>
+            <span class="music-detail">{{ formatMusicDuration(song.duration) }}</span>
+          </div>
+          <button class="music-play" type="button" :disabled="musicBusy" @click="playSongItem(song)">▶</button>
+          <button class="music-fav" type="button" :class="{ on: favoriteHashes.includes(song.hash) }" @click="toggleFavorite(song)">
+            {{ favoriteHashes.includes(song.hash) ? '★' : '☆' }}
+          </button>
+        </div>
+      </div>
+      <div v-if="accountSongs.length" class="music-dialog-actions">
+        <aicode-button :disabled="musicBusy" @click="singCurrentPlaylist">让桌宠从这个歌单唱一首</aicode-button>
+      </div>
     </aicode-dialog>
 
     <aicode-dialog v-model="favoritesOpen" title="收藏歌单" @confirm="favoritesOpen = false">
@@ -1075,6 +1134,108 @@ async function logoutMusic(): Promise<void> {
   }
 }
 
+// ---- 账号歌单（酷狗侧，与本地收藏分开） ----
+
+interface AccountPlaylist {
+  id: string;
+  name: string;
+  songCount: number;
+  cover: string;
+  isDefault: boolean;
+  creator: string;
+}
+
+const accountPlaylists = ref<AccountPlaylist[]>([]);
+const accountListsOpen = ref(false);
+const accountListHint = ref('');
+const accountSongsOpen = ref(false);
+const accountSongs = ref<MusicSong[]>([]);
+const accountSongHint = ref('');
+const currentAccountList = ref<AccountPlaylist | null>(null);
+
+const accountPlaylistSub = computed(() => {
+  if (!musicAccount.value) return '未登录';
+  if (accountPlaylists.value.length === 0) return '点击读取账号歌单';
+  return accountPlaylists.value.length + ' 个歌单';
+});
+
+async function loadAccountPlaylists(): Promise<void> {
+  musicBusy.value = true;
+  accountListHint.value = '';
+  try {
+    const result = await aicode.invoke<{
+      ok?: boolean;
+      playlists?: AccountPlaylist[];
+      message?: string;
+      code?: string;
+    }>('ui.music.accountPlaylists');
+    if (result?.ok !== true) {
+      accountListHint.value = result?.message || '读取账号歌单失败';
+      accountPlaylists.value = [];
+      return;
+    }
+    accountPlaylists.value = result.playlists ?? [];
+    if (accountPlaylists.value.length === 0) {
+      accountListHint.value = '账号里没有歌单，或登录态已失效，可重新登录后再试。';
+    }
+  } catch (error) {
+    accountListHint.value = '读取账号歌单失败：' + (error as Error).message;
+  } finally {
+    musicBusy.value = false;
+  }
+}
+
+async function openAccountPlaylists(): Promise<void> {
+  accountListsOpen.value = true;
+  accountListHint.value = '';
+  if (!musicAccount.value) {
+    accountListHint.value = '未登录：账号歌单需要先登录。';
+    return;
+  }
+  await loadAccountPlaylists();
+}
+
+async function openAccountPlaylist(list: AccountPlaylist): Promise<void> {
+  currentAccountList.value = list;
+  accountSongs.value = [];
+  accountSongHint.value = '';
+  accountSongsOpen.value = true;
+  musicBusy.value = true;
+  try {
+    const result = await aicode.invoke<{ ok?: boolean; songs?: MusicSong[]; message?: string }>(
+      'ui.music.playlistSongs',
+      { id: list.id }
+    );
+    if (result?.ok !== true) {
+      accountSongHint.value = result?.message || '读取歌单歌曲失败';
+      return;
+    }
+    accountSongs.value = result.songs ?? [];
+    if (accountSongs.value.length === 0) accountSongHint.value = '这个歌单里没有歌曲。';
+  } catch (error) {
+    accountSongHint.value = '读取歌单歌曲失败：' + (error as Error).message;
+  } finally {
+    musicBusy.value = false;
+  }
+}
+
+async function singCurrentPlaylist(): Promise<void> {
+  if (!currentAccountList.value) return;
+  musicBusy.value = true;
+  try {
+    const result = await aicode.invoke<{ ok?: boolean; message?: string; song?: { title: string } }>(
+      'ui.pet.singPlaylist',
+      { playlistId: currentAccountList.value.id }
+    );
+    accountSongHint.value =
+      result?.ok === true ? '桌宠正在唱：' + (result.song?.title ?? '') : result?.message || '唱歌失败';
+  } catch (error) {
+    accountSongHint.value = '唱歌失败：' + (error as Error).message;
+  } finally {
+    musicBusy.value = false;
+  }
+}
+
 // ---- 收藏歌单 ----
 
 interface FavoriteSummary {
@@ -1254,6 +1415,7 @@ onMounted(async () => {
   await loadMusicSettings();
   await refreshMusicAccount();
   await refreshFavorites();
+  if (musicAccount.value) await loadAccountPlaylists();
 });
 
 onBeforeUnmount(() => {

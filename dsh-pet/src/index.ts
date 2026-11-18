@@ -17,11 +17,15 @@ import {
   loginWithPhone,
   MusicApiError,
   refreshSession,
+  fetchAccountPlaylists,
+  fetchLyrics,
+  fetchPlaylistSongs,
   resolvePlayUrl,
   searchSongs,
   sendLoginCode
 } from './music';
 import { normalizeSession, type FavoriteList, type MusicSession, type SongItem } from './shared/music';
+import type { LyricLine } from './music';
 
 const CONFIG_PATH = 'data://config.json';
 const STATE_PATH = 'data://state.json';
@@ -239,6 +243,19 @@ function listSummary(): Array<{ id: string; name: string; count: number; updated
   }));
 }
 
+/** 交给系统播放器：ACTION_VIEW 能绕开 WebView 的混合内容限制。 */
+async function openInSystemPlayer(url: string): Promise<{ ok: boolean; code: string; message: string }> {
+  try {
+    await hostCall('host.ui.openUrl', { url });
+    return { ok: true, code: '', message: '' };
+  } catch (error) {
+    const code = errorCode(error) ?? 'OPEN_URL_FAILED';
+    const message =
+      code === 'NO_ACTIVITY' ? '系统里没有能播放该音频的应用' : errorMessage(error);
+    return { ok: false, code, message };
+  }
+}
+
 /** 解析歌曲并返回可播放地址；未登录或受限时把原因带回调用方。 */
 async function playSong(
   song: { hash: string; albumId?: string; albumAudioId?: string }
@@ -257,27 +274,80 @@ async function playSong(
   }
 }
 
-/** 桌宠“唱歌”：从收藏歌单选一首，推给浮层播放。 */
-async function singFromFavorites(listId?: string): Promise<Record<string, unknown>> {
+/** 桌宠“唱歌”：从给定歌曲池或本地收藏随机挑一首，推给浮层播放。 */
+async function singFromPool(songs: SongItem[]): Promise<Record<string, unknown>> {
   await load();
-  const pool = listId ? findList(listId)?.songs ?? [] : favoriteLists.flatMap((list) => list.songs);
-  if (pool.length === 0) {
+  if (songs.length === 0) {
     return { ok: false, code: 'EMPTY_FAVORITES', message: '收藏歌单还是空的，先收藏几首歌吧' };
   }
-  const song = pool[Math.floor(Math.random() * pool.length)];
+  const song = songs[Math.floor(Math.random() * songs.length)];
   const played = await playSong(song);
   if (!played.ok) return { ok: false, code: played.code, message: played.reason };
 
+  // 唱歌期间气泡只显示歌词，先把歌词拉下来。
+  let lyrics: LyricLine[] = [];
+  try {
+    const lyric = await fetchLyrics(settings.music, musicSession, {
+      hash: song.hash,
+      albumAudioId: song.albumAudioId,
+      title: song.title,
+      singer: song.singer
+    });
+    if (lyric.ok) lyrics = lyric.lines;
+  } catch (error) {
+    log(`歌词获取失败：${errorMessage(error)}`);
+  }
+
+  await publishState(settings.animations.action, '♪ ' + song.title + ' - ' + song.singer);
+  // http 音频在插件 WebView 里会被拦，改用系统播放器出声；
+  // 但歌词仍由浮层气泡展示，所以两种情况都要把歌词推给浮层。
+  const viaSystem = /^http:\/\//i.test(played.url);
   if (!overlayId) {
     const opened = await openPet();
-    if (!opened.ok) return { ok: false, code: opened.code || 'OVERLAY_FAILED', message: opened.message || '浮层不可用' };
+    if (!opened.ok) {
+      return { ok: false, code: opened.code || 'OVERLAY_FAILED', message: opened.message || '浮层不可用' };
+    }
   }
-  await publishState(settings.animations.action, '♪ ' + song.title + ' - ' + song.singer);
+  if (viaSystem) {
+    const opened = await openInSystemPlayer(played.url);
+    if (!opened.ok) return { ok: false, code: opened.code, message: opened.message };
+  }
   await postOverlay({
     type: 'pet.sing',
-    song: { title: song.title, singer: song.singer, cover: song.cover, url: played.url }
+    // 系统播放时浮层拿不到音频进度：url 留空，按时间轴自行滚动歌词。
+    song: { title: song.title, singer: song.singer, cover: song.cover, url: viaSystem ? '' : played.url },
+    lyrics,
+    external: viaSystem
   });
-  return { ok: true, song: { title: song.title, singer: song.singer } };
+  return {
+    ok: true,
+    song: { title: song.title, singer: song.singer },
+    player: viaSystem ? 'system' : 'overlay',
+    lyrics: lyrics.length
+  };
+}
+
+/** 兼容旧调用：按本地收藏歌单挑歌。 */
+async function singFromFavorites(listId?: string): Promise<Record<string, unknown>> {
+  await load();
+  const pool = listId ? findList(listId)?.songs ?? [] : favoriteLists.flatMap((list) => list.songs);
+  return singFromPool(pool);
+}
+
+/** 用账号歌单唱歌：先拉歌单歌曲，再随机播一首。 */
+async function singFromAccountPlaylist(playlistId: string): Promise<Record<string, unknown>> {
+  await load();
+  if (!playlistId) return { ok: false, code: 'PARAM_INVALID', message: '缺少歌单 id' };
+  try {
+    const result = await fetchPlaylistSongs(settings.music, musicSession, playlistId, 1, 100);
+    if (!result.ok) return { ok: false, code: 'NO_SESSION', message: result.reason };
+    if (result.songs.length === 0) {
+      return { ok: false, code: 'EMPTY_PLAYLIST', message: '这个歌单里没有可播放的歌曲' };
+    }
+    return await singFromPool(result.songs);
+  } catch (error) {
+    return { ok: false, code: musicErrorCode(error), message: errorMessage(error) };
+  }
 }
 
 async function ensureOverlay(): Promise<string> {
@@ -1024,7 +1094,13 @@ const handlers: Record<string, PluginHandler> = {
       albumAudioId: song.albumAudioId
     });
     if (!played.ok) return played;
-    // 播放在浮层里进行：页面只负责取地址，避免两条音轨同时响。
+    // 音频 CDN 只给 http（强制 https 会证书不匹配），而插件 WebView 禁止混合内容，
+    // 所以 http 交给系统播放器（ACTION_VIEW），只有 https 才交给浮层播放。
+    if (/^http:\/\//i.test(played.url)) {
+      const opened = await openInSystemPlayer(played.url);
+      if (!opened.ok) return { ok: false, code: opened.code, message: opened.message, url: played.url };
+      return { ok: true, url: played.url, reason: '', code: '', player: 'system' };
+    }
     if (!overlayId) {
       const opened = await openPet();
       if (!opened.ok) {
@@ -1035,7 +1111,7 @@ const handlers: Record<string, PluginHandler> = {
       type: 'pet.sing',
       song: { title: song.title ?? '', singer: song.singer ?? '', cover: song.cover ?? '', url: played.url }
     });
-    return played;
+    return { ...played, player: 'overlay' };
   },
 
   // ---- 桌宠唱歌 ----
@@ -1043,6 +1119,37 @@ const handlers: Record<string, PluginHandler> = {
   'ui.pet.sing': async (args: PluginArgs) => {
     const result = await singFromFavorites(readString(args, 'listId') || undefined);
     return result;
+  },
+
+  // ---- 账号歌单（酷狗侧） ----
+
+  'ui.music.accountPlaylists': async (args: PluginArgs) => {
+    await load();
+    const page = Math.max(1, Number(args.page ?? 1) || 1);
+    try {
+      const result = await fetchAccountPlaylists(settings.music, musicSession, page, 50);
+      if (!result.ok) return { ok: false, code: 'NO_SESSION', message: result.reason, playlists: [] };
+      return { ok: true, playlists: result.playlists };
+    } catch (error) {
+      return { ok: false, code: musicErrorCode(error), message: errorMessage(error), playlists: [] };
+    }
+  },
+
+  'ui.music.playlistSongs': async (args: PluginArgs) => {
+    await load();
+    const id = readString(args, 'id');
+    if (!id) return { ok: false, code: 'PARAM_INVALID', message: '缺少歌单 id' };
+    try {
+      const result = await fetchPlaylistSongs(settings.music, musicSession, id, 1, 100);
+      if (!result.ok) return { ok: false, code: 'NO_SESSION', message: result.reason, songs: [] };
+      return { ok: true, songs: result.songs };
+    } catch (error) {
+      return { ok: false, code: musicErrorCode(error), message: errorMessage(error), songs: [] };
+    }
+  },
+
+  'ui.pet.singPlaylist': async (args: PluginArgs) => {
+    return singFromAccountPlaylist(readString(args, 'playlistId'));
   },
 
   'tools.sing': async (args: PluginArgs) => {

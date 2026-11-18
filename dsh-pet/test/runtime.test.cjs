@@ -118,8 +118,20 @@ hostHandlers.set('host.http.request', async (params) => {
     return {
       status: 200,
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ url: 'https://example.com/song.mp3', hash: url.searchParams.get('hash') }),
+      body: JSON.stringify({ url: 'http://example.com/song.mp3', hash: url.searchParams.get('hash') }),
       truncated: false
+    };
+  }
+  if (url.pathname === '/search/lyric') {
+    return {
+      status: 200, headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ candidates: [{ id: 'L1', accesskey: 'KEY1', song: '晴天' }] }), truncated: false
+    };
+  }
+  if (url.pathname === '/lyric') {
+    return {
+      status: 200, headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decodedContent: '[00:01.00]第一句\n[00:02.00]第二句\n' }), truncated: false
     };
   }
   if (url.pathname === '/login/qr/key') {
@@ -140,6 +152,7 @@ hostHandlers.set('host.http.request', async (params) => {
   return json(404, { message: 'not found' });
 });
 
+hostHandlers.set('host.ui.openUrl', async (params) => { calls.push({ openUrl: params.url }); return { ok: true }; });
 hostHandlers.set('host.notify', async (params) => {
   calls.push({ notify: params });
   return { ok: true };
@@ -558,16 +571,24 @@ async function run() {
   const playOk = await invokeHandler('ui.music.playUrl', { song: favSong });
   if (!playOk || playOk.ok !== true || !playOk.url) failures.push('登录后取播放地址失败: ' + JSON.stringify(playOk));
 
+  const openedSystem = calls.filter((c) => c.openUrl).pop();
+  if (!openedSystem) failures.push('http 音频应交由系统播放器打开');
+  if (playOk && playOk.player !== 'system') failures.push('http 音频应标记 player=system，实际 ' + playOk.player);
+
   const playReq = musicRequests.filter((r) => r.path === '/song/url').pop();
   if (!playReq) failures.push('未发出 /song/url 请求');
   else if (!playReq.query.includes('album_audio_id=32100650')) {
     failures.push('/song/url 未带数字 album_audio_id');
+  }
+  if (playReq && !playReq.query.includes('quality=128')) {
+    failures.push('quality 必须是 128（standard 会返回 20010）: ' + playReq.query);
   }
 
   // ---- 桌宠唱歌 ----
 
   const sing = await invokeHandler('ui.pet.sing', { listId });
   if (!sing || sing.ok !== true) failures.push('桌宠唱歌失败: ' + JSON.stringify(sing));
+  if (sing && typeof sing.lyrics === 'number' && sing.lyrics === 0) failures.push('唱歌未带上歌词');
 
   const singStop = await invokeHandler('overlay.message', {
     overlayId: 'overlay-1',

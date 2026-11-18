@@ -287,16 +287,96 @@ let songEl: HTMLAudioElement | null = null;
 const singing = ref(false);
 
 /** 播放桌宠唱的歌曲；与朗读共用一套 Audio 元素，避免两条音轨同时响。 */
-function playSong(song: { url?: string; title?: string } | null): void {
-  if (!song?.url) return;
+interface LyricLine {
+  timeMs: number;
+  text: string;
+}
+
+const lyrics = ref<LyricLine[]>([]);
+let lyricIndex = -1;
+let lyricTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopLyricTimer(): void {
+  if (lyricTimer) {
+    clearInterval(lyricTimer);
+    lyricTimer = null;
+  }
+}
+
+/** 唱歌期间按播放进度只显示当前歌词行。 */
+function startLyricTimer(): void {
+  stopLyricTimer();
+  lyricIndex = -1;
+  if (lyrics.value.length === 0) return;
+  lyricTimer = setInterval(() => {
+    if (!songEl || songEl.paused) return;
+    applyLyricAt(songEl.currentTime * 1000);
+  }, 250);
+}
+
+function setLyrics(next: LyricLine[] | undefined): void {
+  lyrics.value = Array.isArray(next) ? next : [];
+  lyricIndex = -1;
+}
+
+/** 把当前时间对应的歌词写进气泡，并绕开自动隐藏计时。 */
+function applyLyricAt(nowMs: number): void {
+  let index = -1;
+  for (let i = 0; i < lyrics.value.length; i += 1) {
+    if (lyrics.value[i].timeMs <= nowMs) index = i;
+    else break;
+  }
+  if (index === lyricIndex) return;
+  lyricIndex = index;
+  if (index < 0) return;
+  bubbleText.value = lyrics.value[index].text.slice(0, 240);
+  if (bubbleTimer) {
+    clearTimeout(bubbleTimer);
+    bubbleTimer = null;
+  }
+}
+
+/** 系统播放器出声时，按墙钟时间推进歌词（拿不到真实进度，只能估算）。 */
+function startExternalLyrics(): void {
+  stopLyricTimer();
+  lyricIndex = -1;
+  singing.value = true;
+  if (lyrics.value.length === 0) {
+    showBubble('♪ 正在播放');
+    return;
+  }
+  const startedAt = Date.now();
+  const lastEnd = lyrics.value[lyrics.value.length - 1].timeMs + 5000;
+  lyricTimer = setInterval(() => {
+    const elapsed = Date.now() - startedAt;
+    applyLyricAt(elapsed);
+    if (elapsed > lastEnd) {
+      stopLyricTimer();
+      singing.value = false;
+      bubbleText.value = '';
+    }
+  }, 250);
+}
+
+function playSong(song: { url?: string; title?: string; lyrics?: LyricLine[] } | null): void {
+  if (!song) return;
+  setLyrics(song.lyrics);
+  // 由系统播放器出声时没有 audio 元素，用墙钟时间驱动歌词。
+  if (!song.url) {
+    startExternalLyrics();
+    return;
+  }
   if (!songEl) {
     songEl = new Audio();
     songEl.preload = 'auto';
     songEl.addEventListener('ended', () => {
       singing.value = false;
+      stopLyricTimer();
+      bubbleText.value = '';
     });
     songEl.addEventListener('error', () => {
       singing.value = false;
+      stopLyricTimer();
     });
   }
   speechEl?.pause();
@@ -304,8 +384,10 @@ function playSong(song: { url?: string; title?: string } | null): void {
   singing.value = true;
   void songEl.play().catch(() => {
     singing.value = false;
+    stopLyricTimer();
     showBubble('这首唱不了，换一首吧。');
   });
+  startLyricTimer();
 }
 
 function stopSong(): void {
@@ -314,6 +396,9 @@ function stopSong(): void {
     songEl.currentTime = 0;
   }
   singing.value = false;
+  stopLyricTimer();
+  lyrics.value = [];
+  bubbleText.value = '';
 }
 
 async function doSing(): Promise<void> {
@@ -349,6 +434,8 @@ function playClickSound(): void {
 
 function showBubble(text: string): void {
   if (!text) return;
+  // 唱歌期间气泡只显示歌词，其它消息一律不覆盖。
+  if (singing.value) return;
   bubbleText.value = text.slice(0, 240);
   if (bubbleTimer) clearTimeout(bubbleTimer);
   bubbleTimer = setTimeout(() => {
@@ -421,7 +508,9 @@ function applyState(next: PetState): void {
   if (textChanged && state.value.lastText) {
     // 睡着时只有睡眠台词能弹气泡，运行状态/碎碎念一律静默。
     const sleepLine = !state.value.sleeping || SLEEP_ANIMATIONS.includes(state.value.lastAnimation ?? 'idle');
-    if (sleepLine) showBubble(state.value.lastText);
+    // 唱歌期间气泡只留给歌词。
+    const singingNow = singing.value;
+    if (sleepLine && !singingNow) showBubble(state.value.lastText);
   }
   if (animationChanged && state.value.lastAnimation) {
     // 睡着时只播睡眠动画，避免任何状态推送把它叫起来。
@@ -443,7 +532,10 @@ function onMessage(raw: OverlayMessage): void {
   } else if (message.type === 'pet.speech') {
     playSpeech(message.audio as SpeechAudio | null);
   } else if (message.type === 'pet.sing') {
-    playSong(message.song as { url?: string; title?: string } | null);
+    // 进程把歌词放在消息顶层，这里合并进 song，保持 playSong 单一入口。
+    const song = message.song as { url?: string; title?: string; cover?: string } | null;
+    const lines = Array.isArray(message.lyrics) ? (message.lyrics as LyricLine[]) : [];
+    playSong(song ? { ...song, lyrics: lines } : null);
   } else if (message.type === 'pet.singStop') {
     stopSong();
   } else if (message.type === 'click') {
@@ -537,6 +629,7 @@ onBeforeUnmount(() => {
   videoA.value?.pause();
   videoB.value?.pause();
   stopSong();
+  stopLyricTimer();
   songEl = null;
   videoA.value?.removeAttribute('src');
   videoB.value?.removeAttribute('src');

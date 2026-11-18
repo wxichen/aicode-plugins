@@ -284,7 +284,8 @@ export async function resolvePlayUrl(
   if (!session) return { url: '', reason: '未登录：播放地址需要登录后才能获取' };
   const query: Record<string, unknown> = {
     hash: song.hash,
-    quality: 'standard',
+    // 实测 quality 只认数字码：'standard' 会返回 20010，128 才能拿到地址。
+    quality: '128',
     free_part: false
   };
   // album_audio_id 必须是数字，否则服务端解析失败返回空地址。
@@ -294,9 +295,165 @@ export async function resolvePlayUrl(
   const { payload } = await request(settings, session, 'song/url', query);
   const obj = asRecord(payload);
   const data = Array.isArray(obj.data) ? asRecord(obj.data[0]) : asRecord(obj.data);
-  const url = pickString(obj, ['url']) || pickString(data, ['url']);
+  // url 可能是字符串或字符串数组，两种都取第一个可用地址。
+  const urlList = Array.isArray(obj.url) ? obj.url : Array.isArray(data.url) ? data.url : [];
+  const fromList = urlList
+    .map((item) => (typeof item === 'string' ? item : ''))
+    .find((item) => item.startsWith('http'));
+  const url = pickString(obj, ['url']) || pickString(data, ['url']) || fromList || '';
   if (url) return { url, reason: '' };
   const reason = pickString(obj, ['error', 'message']) || pickString(data, ['error', 'message']);
   const errcode = pickNumber(obj, ['errcode', 'err_code']);
   return { url: '', reason: reason || (errcode ? `服务端拒绝（errcode=${errcode}）` : '未获取到播放地址') };
+}
+
+/** 账号里的一个歌单（酷狗侧），与插件本地收藏区分开。 */
+export interface AccountPlaylist {
+  /** 请求歌曲列表时用的 id（优先 global_collection_id） */
+  id: string;
+  name: string;
+  songCount: number;
+  cover: string;
+  /** 是否为「我喜欢」 */
+  isDefault: boolean;
+  creator: string;
+}
+
+function mapAccountPlaylist(raw: unknown, currentUserId: string): AccountPlaylist | null {
+  const input = asRecord(raw);
+  const globalId = pickString(input, ['global_collection_id', 'globalCollectionId']);
+  const listId = pickString(input, ['listid', 'list_id', 'id', 'specialid']);
+  // 曲库接口优先用 global_collection_id，退回 listid。
+  const id = globalId || listId;
+  if (!id) return null;
+  const name = pickString(input, ['name', 'specialname', 'listname', 'title']);
+  const isDefault =
+    pickNumber(input, ['is_def', 'is_default', 'isDefault']) === 1 ||
+    /我喜欢|收藏/.test(name);
+  return {
+    id,
+    name: name || '未命名歌单',
+    songCount: pickNumber(input, ['count', 'song_count', 'songCount', 'total']),
+    cover: normalizeCover(
+      pickString(input, ['img', 'image', 'pic', 'flexible_cover', 'list_pic', 'cover'])
+    ),
+    isDefault,
+    creator: pickString(input, ['list_create_username', 'nickname', 'username', 'creator']) ||
+      (currentUserId ? '用户 ' + currentUserId : '')
+  };
+}
+
+/** 拉取当前账号的歌单；未登录直接返回空并给出原因。 */
+export async function fetchAccountPlaylists(
+  settings: MusicSettings,
+  session: MusicSession | null,
+  page = 1,
+  pageSize = 50
+): Promise<{ ok: boolean; playlists: AccountPlaylist[]; reason: string }> {
+  if (!session) return { ok: false, playlists: [], reason: '未登录：无法读取账号歌单' };
+  const { payload } = await request(settings, session, 'user/playlist', { page, pagesize: pageSize });
+  const obj = asRecord(payload);
+  const currentUserId = pickString(obj, ['userid', 'userId']);
+  const list = Array.isArray(obj.info)
+    ? obj.info
+    : Array.isArray(obj.data)
+      ? obj.data
+      : Array.isArray(obj.list)
+        ? obj.list
+        : [];
+  const playlists = list
+    .map((item) => mapAccountPlaylist(item, currentUserId))
+    .filter((item): item is AccountPlaylist => item !== null);
+  return { ok: true, playlists, reason: '' };
+}
+
+/** 拉取指定歌单的歌曲。 */
+export async function fetchPlaylistSongs(
+  settings: MusicSettings,
+  session: MusicSession | null,
+  playlistId: string,
+  page = 1,
+  pageSize = 100
+): Promise<{ ok: boolean; songs: SongItem[]; reason: string }> {
+  if (!session) return { ok: false, songs: [], reason: '未登录：无法读取歌单歌曲' };
+  const { payload } = await request(settings, session, 'playlist/track/all', {
+    id: playlistId,
+    page,
+    pagesize: pageSize
+  });
+  const obj = asRecord(payload);
+  const list = Array.isArray(obj.songs)
+    ? obj.songs
+    : Array.isArray(obj.data)
+      ? obj.data
+      : Array.isArray(payload)
+        ? (payload as unknown[])
+        : [];
+  const songs = list.map(mapSong).filter((song): song is SongItem => song !== null);
+  return { ok: true, songs, reason: '' };
+}
+
+/** 一行歌词：毫秒时间戳 + 文本。 */
+export interface LyricLine {
+  timeMs: number;
+  text: string;
+}
+
+/** 把 LRC 文本解析成带时间轴的歌词行，过滤元信息与空行。 */
+export function parseLrc(raw: string): LyricLine[] {
+  if (!raw) return [];
+  const lines: LyricLine[] = [];
+  const tagPattern = /\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g;
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const times: number[] = [];
+    let match: RegExpExecArray | null;
+    tagPattern.lastIndex = 0;
+    while ((match = tagPattern.exec(rawLine)) !== null) {
+      const minutes = Number(match[1]);
+      const seconds = Number(match[2]);
+      const fraction = match[3] ?? '0';
+      const ms = fraction.length === 3 ? Number(fraction) : fraction.length === 2 ? Number(fraction) * 10 : Number(fraction) * 100;
+      times.push(minutes * 60_000 + seconds * 1000 + ms);
+    }
+    if (times.length === 0) continue;
+    const text = rawLine.replace(tagPattern, '').trim();
+    // 元信息（[ti:]、[ar:] 等）没有时间戳，已被过滤；纯符号行也跳过。
+    if (!text) continue;
+    for (const timeMs of times) lines.push({ timeMs, text });
+  }
+  return lines.sort((a, b) => a.timeMs - b.timeMs);
+}
+
+/** 取歌曲歌词；先用 hash 找候选，再按候选的 id + accesskey 拉内容。 */
+export async function fetchLyrics(
+  settings: MusicSettings,
+  session: MusicSession | null,
+  song: { hash: string; albumAudioId?: string; title?: string; singer?: string }
+): Promise<{ ok: boolean; lines: LyricLine[]; reason: string }> {
+  if (!song.hash) return { ok: false, lines: [], reason: '缺少歌曲 hash' };
+  const searchQuery: Record<string, unknown> = { hash: song.hash };
+  if (song.albumAudioId && /^\d+$/.test(song.albumAudioId)) searchQuery.album_audio_id = song.albumAudioId;
+  const { payload } = await request(settings, session, 'search/lyric', searchQuery);
+  const obj = asRecord(payload);
+  const candidates = Array.isArray(obj.candidates) ? obj.candidates : [];
+  const first = asRecord(candidates[0]);
+  const id = pickString(first, ['id', 'lyrics_id', 'lyric_id']);
+  const accessKey = pickString(first, ['accesskey', 'access_key']);
+  if (!id || !accessKey) return { ok: false, lines: [], reason: '没有找到这首歌的歌词' };
+
+  const { payload: lyricPayload } = await request(settings, session, 'lyric', {
+    id,
+    accesskey: accessKey,
+    fmt: 'lrc',
+    decode: true
+  });
+  const lyricObj = asRecord(lyricPayload);
+  const content =
+    pickString(lyricObj, ['decodedContent']) ||
+    pickString(lyricObj, ['rawContent']) ||
+    pickString(lyricObj, ['content']) ||
+    pickString(lyricObj, ['lyric']);
+  const lines = parseLrc(content);
+  if (lines.length === 0) return { ok: false, lines: [], reason: '歌词内容为空' };
+  return { ok: true, lines, reason: '' };
 }

@@ -1,7 +1,7 @@
 {
   "name": "aicode-plugin-dsh-pet",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "AiCode 桌宠插件 wxichen.dsh-pet",
   "scripts": {
     "build": "node build.mjs",
